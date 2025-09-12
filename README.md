@@ -18,11 +18,11 @@ high‑level design.
 
 ### Current Limitations & Future Work
 
-*   **No KV-Cache Preservation (Inference)**: This is the most significant limitation for inference. The system currently drains in-flight requests before swapping weights, which means the valuable KV-cache is discarded. This makes it unsuitable for true, zero-downtime hot swaps of long, stateful sequences. Supporting KV-cache migration or transformation is a complex feature planned for the future.
+*   **KV-Cache Migration (Inference)**: Conservative, opt-in transforms are available (dtype/RoPE adjustments and head remapping for compatible GQA layouts), but full, production-grade KV migration for all architectures is ongoing work. For strict zero-downtime swaps on long sequences, plan to drain requests or validate transforms for your model family.
 
-*   **Optimizer State Management (Training)**: While weights can be swapped during training, the corresponding optimizer state (e.g., moments in Adam) is not currently handled. The `trainer_swap` adapter simply resets the gradient. Full optimizer state migration is a planned feature to enable more seamless training continuity.
+*   **Optimizer State (Training)**: Policy controls exist for Adam-like optimizers (preserve/reset/attenuate moments with an attenuation factor). Deeper transforms and end-to-end guides for FSDP/ZeRO training stacks will continue to evolve.
 
-*   **CUDA IPC Zero-Copy Transport**: The groundwork is laid for highly efficient, zero-copy transfers using CUDA IPC handles, but this is still under development.
+*   **Multi-node Perf Validation**: CUDA-IPC is implemented with adaptive windowing and optional GDS. We’ve added observability and fallbacks, but broader, published multi-node performance validation (8–32 GPUs) and SLO assertions are planned.
 
 ## Install (editable)
 
