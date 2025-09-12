@@ -3,8 +3,8 @@
 Fast, versioned weight updates for LLM serving and training.
 
 This repository provides a control/plan/transport stack to hot‑swap large model
-weights across a GPU cluster with minimal pause time. See `idea.md` for the
-high‑level design.
+weights across a GPU cluster with minimal pause time. See `docs/ARCHITECTURE.md`
+for a high‑level overview.
 
 ## Core Use Cases & Limitations
 
@@ -108,6 +108,14 @@ pytest -q
 
 ### Tuning Guide
 - See `docs/TUNING.md` for end-to-end tuning knobs and recommended defaults for different environments.
+
+### Repo Structure (key directories)
+- `hotweights/`: library sources (planning, transports, control plane, adapters, CLI)
+- `docs/`: deployment, tuning, presets, walkthroughs, and architecture overview
+- `dashboards/`: Prometheus/Grafana dashboards
+- `scripts/`: helper scripts (presets and demos)
+- `bench/`: small benchmark helpers
+- `tests/`: unit tests (pytest)
 
 ## Metrics & Monitoring
 
