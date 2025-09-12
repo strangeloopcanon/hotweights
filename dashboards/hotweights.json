@@ -1,0 +1,46 @@
+{
+  "annotations": {"list": []},
+  "panels": [
+    {"type": "graph", "title": "IPC Window (current vs recommended)", "targets": [
+      {"expr": "hotweights_ipc_window", "legendFormat": "window"},
+      {"expr": "hotweights_ipc_recommended_window", "legendFormat": "recommended"}
+    ], "id": 1},
+    {"type": "graph", "title": "Inflight Buckets/Bytes", "targets": [
+      {"expr": "hotweights_ipc_inflight_buckets", "legendFormat": "buckets"},
+      {"expr": "hotweights_ipc_inflight_bytes", "legendFormat": "bytes"}
+    ], "id": 2},
+    {"type": "graph", "title": "Congestion Risk", "targets": [
+      {"expr": "hotweights_ipc_congestion_risk", "legendFormat": "risk"}
+    ], "id": 3},
+    {"type": "graph", "title": "Path Utilization", "targets": [
+      {"expr": "hotweights_ipc_path_utilization", "legendFormat": "{{path}}"}
+    ], "id": 4},
+    {"type": "graph", "title": "CUDA-IPC Timings (avg s)", "targets": [
+      {"expr": "hotweights_ipc_assemble_seconds_sum / hotweights_ipc_assemble_seconds_count", "legendFormat": "assemble"},
+      {"expr": "hotweights_ipc_scatter_seconds_sum / hotweights_ipc_scatter_seconds_count", "legendFormat": "scatter"},
+      {"expr": "hotweights_ipc_bucket_seconds_sum / hotweights_ipc_bucket_seconds_count", "legendFormat": "bucket"}
+    ], "id": 5},
+    {"type": "graph", "title": "Binder Pause (s)", "targets": [
+      {"expr": "hotweights_binder_last_pause_seconds", "legendFormat": "pause"}
+    ], "id": 6},
+    {"type": "graph", "title": "Coordinator Workers/Acks", "targets": [
+      {"expr": "hotweights_coord_workers", "legendFormat": "workers"},
+      {"expr": "hotweights_coord_precommit_acks", "legendFormat": "acks"}
+    ], "id": 7},
+    {"type": "graph", "title": "UCX Bytes (sent/received)", "targets": [
+      {"expr": "hotweights_ucx_bytes_sent_total", "legendFormat": "sent"},
+      {"expr": "hotweights_ucx_bytes_received_total", "legendFormat": "received"}
+    ], "id": 8},
+    {"type": "graph", "title": "UCX Retries & Delay", "targets": [
+      {"expr": "hotweights_ucx_send_retries_total", "legendFormat": "retries"},
+      {"expr": "hotweights_ucx_retry_delay_ms", "legendFormat": "retry_delay_ms"}
+    ], "id": 9},
+    {"type": "graph", "title": "UCX Last Error", "targets": [
+      {"expr": "hotweights_ucx_last_error", "legendFormat": "last_error"},
+      {"expr": "hotweights_ucx_last_error_ts", "legendFormat": "last_error_ts"}
+    ], "id": 10}
+  ],
+  "schemaVersion": 39,
+  "title": "Hotweights",
+  "version": 2
+}

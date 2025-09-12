@@ -1,0 +1,2 @@
+"""Staging package (stubs)."""
+

@@ -1,0 +1,21 @@
+{
+  "model_id": "model",
+  "version": "2025-09-11",
+  "tensors": [
+    {
+      "name": "a.bin",
+      "dtype": null,
+      "shape": null,
+      "partitioning": null,
+      "quant": null,
+      "shards": [
+        {
+          "rank": 0,
+          "bytes": 6,
+          "hash": "sha256:5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03",
+          "uri": "file:///Users/rohit/Library/CloudStorage/OneDrive-Personal/Coding_Analysis/Bodo_checkpoint_engine/example_ckpt/a.bin"
+        }
+      ]
+    }
+  ]
+}

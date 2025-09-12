@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hotweights"
+version = "0.0.1"
+description = "Fast, versioned weight updates for LLM serving and training"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Proprietary" }
+authors = [{ name = "Hotweights Contributors" }]
+dependencies = [
+  "numpy>=1.24",
+  "pandas>=1.5",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=7.0",
+  "ruff>=0.5.0",
+  "black>=24.1.0",
+  "mypy>=1.7.0",
+]
+extras = [
+  "pyzmq>=25.1.0",
+  "mpi4py>=3.1.4",
+  "ucx-py>=0.35.0",
+  "prometheus-client>=0.20.0",
+]
+
+[project.scripts]
+hotweights = "hotweights.cli:main"
+
+[tool.black]
+line-length = 88
+target-version = ["py310"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+select = [
+  "E","F","I","UP","B","ANN","N","W","C90"
+]
+ignore = ["ANN101", "ANN102"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["hotweights"]

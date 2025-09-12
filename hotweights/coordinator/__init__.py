@@ -1,0 +1,2 @@
+"""Coordinator package (stubs)."""
+
