@@ -206,3 +206,7 @@ binding = bind_to_vllm(vllm_worker_or_engine, name_map_fn, endpoint="tcp://127.0
 - Workers export `hotweights_buckets_total` and `hotweights_last_bucket_size_bytes`.
 - Coordinator exports `hotweights_coord_workers`, `hotweights_coord_precommit_acks`, and `hotweights_coord_have_buckets`.
 - Import `dashboards/hotweights.json` into Grafana for a basic view; extend panels per your needs.
+
+## License
+
+This project is licensed under the Apache License, Version 2.0. See the `LICENSE` file for details.

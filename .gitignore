@@ -26,3 +26,5 @@ bench.json
 demo_ckpt_*/
 demo_ucx_ckpt_*/
 
+# Project-local docs (do not commit)
+idea.md
