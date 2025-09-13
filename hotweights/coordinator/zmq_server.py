@@ -25,11 +25,13 @@ class State:
     workers: Dict[str, dict] = field(default_factory=dict)
     plan: Dict[str, Any] | None = None
     plan_digest: str | None = None
+    current_manifest: Dict[str, Any] | None = None
     have: Dict[int, list[int]] = field(default_factory=dict)  # bucket_id -> ranks
     precommit_acks: Dict[str, bool] = field(default_factory=dict)
     heartbeats: Dict[str, float] = field(default_factory=dict)
     rpc_total: Dict[str, int] = field(default_factory=dict)
     last_events: Dict[str, Any] = field(default_factory=dict)
+    state: str = "idle"  # idle|begun|precommit|committed|aborted
 
 
 def _derive_pub_endpoint(endpoint: str) -> str:
@@ -90,6 +92,13 @@ def serve(
         # metrics: rpc counter
         st.rpc_total[method] = st.rpc_total.get(method, 0) + 1
 
+        # Helper: require token for mutating RPCs when configured
+        def _check_token() -> bool:
+            if not event_token:
+                return True
+            tok = args.get("token")
+            return bool(tok == event_token)
+
         if method == "register":
             wid = args.get("worker_id", "?")
             caps = args.get("caps", {})
@@ -107,11 +116,14 @@ def serve(
             st.heartbeats[wid] = time.time()
             rep.send_json({"ok": True})
         elif method == "begin":
+            if not _check_token():
+                rep.send_json({"error": "unauthorized"}); continue
             st.version = args.get("version")
             st.plan_digest = args.get("digest") or st.plan_digest
             # reset precommit and have tracking for the new version
             st.precommit_acks.clear()
             st.have.clear()
+            st.state = "begun"
             payload = {"event": "begin", "version": st.version, "digest": st.plan_digest}
             rep.send_json(payload)
             try:
@@ -120,8 +132,11 @@ def serve(
                 pass
             _pub("begin", payload)
         elif method == "precommit":
+            if not _check_token():
+                rep.send_json({"error": "unauthorized"}); continue
             wid = args.get("worker_id", "?")
             st.precommit_acks[wid] = True
+            st.state = "precommit"
             rep.send_json({"ok": True, "acks": len(st.precommit_acks)})
             try:
                 log.info(f"precommit worker_id={wid} acks={len(st.precommit_acks)}")
@@ -129,6 +144,8 @@ def serve(
                 pass
             _pub("precommit", {"worker_id": wid, "acks": len(st.precommit_acks)})
         elif method == "commit":
+            if not _check_token():
+                rep.send_json({"error": "unauthorized"}); continue
             st.version = args.get("version")
             missing = [wid for wid in st.workers.keys() if wid not in st.precommit_acks]
             payload = {
@@ -140,6 +157,7 @@ def serve(
                 "waiting_for": missing,
                 "digest": st.plan_digest,
             }
+            st.state = "committed" if len(missing) == 0 else st.state
             rep.send_json(payload)
             try:
                 log.info(f"commit version={st.version} accepted={payload['accepted']} waiting={missing}")
@@ -147,14 +165,33 @@ def serve(
                 pass
             _pub("commit", payload)
         elif method == "abort":
+            if not _check_token():
+                rep.send_json({"error": "unauthorized"}); continue
             payload = {"event": "abort", "reason": args.get("reason")}
+            st.state = "aborted"
             rep.send_json(payload)
             _pub("abort", payload)
         elif method == "submit_plan":
+            if not _check_token():
+                rep.send_json({"error": "unauthorized"}); continue
             st.plan = args.get("plan")
             st.plan_digest = args.get("digest")
             rep.send_json({"ok": True, "digest": st.plan_digest})
             _pub("plan", {"digest": st.plan_digest, "buckets": len((st.plan or {}).get("buckets", []))})
+        elif method == "set_current_manifest":
+            if not _check_token():
+                rep.send_json({"error": "unauthorized"}); continue
+            # Persist the current (running) manifest; used for delta planning without explicit prev
+            st.current_manifest = args.get("manifest")
+            # Optionally set version from manifest
+            try:
+                st.version = (st.current_manifest or {}).get("version")
+            except Exception:
+                pass
+            rep.send_json({"ok": True, "version": st.version})
+            _pub("status", {"event": "current_manifest_updated", "version": st.version})
+        elif method == "get_current_manifest":
+            rep.send_json({"manifest": st.current_manifest, "version": st.version})
         elif method == "get_plan":
             rep.send_json({"plan": st.plan, "digest": st.plan_digest})
         elif method == "report_have":
@@ -179,12 +216,14 @@ def serve(
             rep.send_json({
                 "workers": list(st.workers.keys()),
                 "version": st.version,
+                "current_manifest": bool(st.current_manifest),
                 "plan_digest": st.plan_digest,
                 "have": {str(k): v for k, v in st.have.items()},
                 "precommit_acks": list(st.precommit_acks.keys()),
                 "heartbeats": st.heartbeats,
                 "rpc_total": st.rpc_total,
                 "last_events": st.last_events,
+                "state": st.state,
             })
         elif method == "list_workers":
             rep.send_json({"workers": st.workers})

@@ -23,6 +23,7 @@ except Exception:  # pragma: no cover
     ucp = None  # type: ignore
 
 from ..telemetry.prom import Counter, Gauge
+from .base import Transport
 from ..telemetry.logging import get_logger
 
 
@@ -30,7 +31,7 @@ Bucket = Tuple[int, np.ndarray]
 
 
 @dataclass
-class UCXReplicator:
+class UCXReplicator(Transport):
     window: int = 2
     chunk_bytes: int = 8 << 20  # 8 MiB chunks
     send_concurrency: int = 0  # 0 -> fanout to all peers per chunk

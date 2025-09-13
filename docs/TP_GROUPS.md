@@ -24,7 +24,7 @@ Example (JSON file):
     "1": [4, 5, 6, 7]
   }
   
-  $ HOTWEIGHTS_TP_GROUPS=groups.json hotweights plan --prev prev.json --next next.json --bucket-mb 512
+  $ HOTWEIGHTS_TP_GROUPS=groups.json hotweights plan --next next.json --bucket-mb 512 --coord-endpoint tcp://127.0.0.1:5555
 
 Validation Rules
 
@@ -36,4 +36,3 @@ Notes
 
 - If `partitioning.tp_group` (or `group`/`group_id`) is missing on tensors, the mapping cannot be applied for those items.
 - `consumer_ranks` affects broadcast and scatter; buckets are only transmitted to the listed ranks in MPI/UCX/CUDA-IPC paths.
-

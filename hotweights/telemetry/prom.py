@@ -44,13 +44,17 @@ class Counter:
 
 
 class Gauge:
-    def __init__(self, name: str, desc: str = "") -> None:
+    def __init__(self, name: str, desc: str = "", labelnames: list[str] | None = None) -> None:
         self._name = name
+        self._labelnames = list(labelnames) if labelnames else None
         if _PGauge is not None:
             if name in _GAUGES:
                 self._g = _GAUGES[name]
             else:
-                self._g = _PGauge(name, desc)
+                if self._labelnames:
+                    self._g = _PGauge(name, desc, self._labelnames)
+                else:
+                    self._g = _PGauge(name, desc)
                 _GAUGES[name] = self._g
         else:
             self._g = None
@@ -60,6 +64,24 @@ class Gauge:
             self._g.set(val)
         else:
             _set_text(self._name, val)
+
+    # Minimal labels() support; for text server, labels are ignored
+    def labels(self, **kwargs):  # noqa: ANN003
+        if self._g is not None and hasattr(self._g, "labels"):
+            g = self._g.labels(**kwargs)
+            class _Labeled:
+                def __init__(self, inner):
+                    self._inner = inner
+                def set(self, val: float) -> None:
+                    self._inner.set(val)
+            return _Labeled(g)
+        # Fallback no-op label wrapper
+        class _LabeledText:
+            def __init__(self, outer_name: str):
+                self._name = outer_name
+            def set(self, val: float) -> None:
+                _set_text(self._name, val)
+        return _LabeledText(self._name)
 
 
 def start_http_server(port: int = 9099) -> Optional[object]:

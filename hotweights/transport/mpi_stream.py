@@ -16,13 +16,14 @@ except Exception:  # pragma: no cover - optional dependency
     MPI = None  # type: ignore
 
 from ..telemetry.prom import Counter, Gauge
+from .base import Transport
 from ..telemetry.logging import get_logger
 
 Bucket = Tuple[int, np.ndarray]
 
 
 @dataclass
-class MPIReplicator:
+class MPIReplicator(Transport):
     bucket_bytes: int = 512 << 20
     window: int = 2
     group_ranks: Optional[list[int]] = None
@@ -161,3 +162,17 @@ class MPIReplicator:
         for b, r, buf0 in inflight:
             r.Wait()
             on_complete(b, buf0)
+
+    def cleanup(self) -> None:
+        """Free cached communicators if possible."""
+        if self._mpi is None:
+            return
+        try:
+            for comm in self._comms_cache.values():
+                try:
+                    comm.Free()
+                except Exception:
+                    pass
+            self._comms_cache.clear()
+        except Exception:
+            pass
