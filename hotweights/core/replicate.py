@@ -5,15 +5,16 @@ Centralizes logic shared by CLI, worker, and adapters.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Callable, Any
 import fnmatch
 import json
 import numpy as np
 
 from ..planner_bodo import compute_delta, pack_buckets
+from .schemas import Plan, PLAN_SCHEMA_VERSION
 
 
-def create_plan(prev: dict, nxt: dict, bucket_mb: int, consumer_map: Optional[Dict[str, List[int]]] = None) -> dict:
+def create_plan(prev: dict, nxt: dict, bucket_mb: int, consumer_map: Optional[Dict[str, List[int]]] = None) -> Plan:
     import pandas as pd
 
     def to_df(m):
@@ -151,13 +152,116 @@ def create_plan(prev: dict, nxt: dict, bucket_mb: int, consumer_map: Optional[Di
             for b in buckets.values():
                 b["consumer_ranks"] = ranks
 
-    plan = {
+    plan: Plan = {
+        "plan_version": PLAN_SCHEMA_VERSION,
         "version": nxt.get("version", "unknown"),
         "bucket_bytes": bucket_bytes,
         "total_bytes": int(packed["nbytes"].sum()) if len(packed) else 0,
         "buckets": [buckets[k] for k in sorted(buckets.keys())],
     }
     return plan
+
+
+def create_plan_from_current(
+    nxt: dict,
+    current_provider: Callable[[], dict],
+    bucket_mb: int,
+    consumer_map: Optional[Dict[str, List[int]]] = None,
+) -> Plan:
+    """Create a plan using the current manifest provided by a callable.
+
+    The provider is responsible for returning the current (prev) manifest.
+    """
+    prev = current_provider()
+    return create_plan(prev, nxt, bucket_mb=bucket_mb, consumer_map=consumer_map)
+
+
+def verify_plan(
+    plan: dict,
+    require_consumers: bool = False,
+    world_size: Optional[int] = None,
+    tp_groups: Optional[Dict[str, List[int]]] = None,
+    enforce_tp_superset: bool = False,
+) -> Dict[str, Any]:
+    """Validate a transfer plan.
+
+    Returns a structured report including problems and warnings.
+    """
+    total = len(plan.get("buckets", []))
+    missing = 0
+    empty = 0
+    out_of_range = 0
+    dupes = 0
+    problems: List[dict] = []
+    warnings_: List[dict] = []
+
+    ws = world_size
+
+    for b in plan.get("buckets", []):
+        ranks = b.get("consumer_ranks")
+        if ranks is None:
+            if require_consumers:
+                problems.append({"bucket_id": b.get("bucket_id"), "error": "missing consumer_ranks"})
+                missing += 1
+            continue
+        if isinstance(ranks, list):
+            if len(ranks) == 0:
+                empty += 1
+                warnings_.append({"bucket_id": b.get("bucket_id"), "warning": "empty consumer_ranks"})
+            if len(set(int(x) for x in ranks)) != len(ranks):
+                dupes += 1
+                warnings_.append({"bucket_id": b.get("bucket_id"), "warning": "duplicate ranks in consumer_ranks"})
+            if ws is not None:
+                bad = [int(x) for x in ranks if int(x) < 0 or int(x) >= ws]
+                if bad:
+                    out_of_range += 1
+                    problems.append({
+                        "bucket_id": b.get("bucket_id"),
+                        "error": f"ranks out of range [0,{ws-1}]",
+                        "bad": bad,
+                    })
+            if tp_groups and isinstance(tp_groups, dict):
+                try:
+                    valid = {int(x) for v in tp_groups.values() for x in v}
+                    extra = [int(x) for x in ranks if int(x) not in valid]
+                    if extra:
+                        warnings_.append({
+                            "bucket_id": b.get("bucket_id"),
+                            "warning": "ranks not in TP groups union",
+                            "extra": extra,
+                        })
+                    if enforce_tp_superset:
+                        # If any tensor in bucket has a group, enforce that group's ranks ⊆ consumer_ranks
+                        groups_in_bucket = set()
+                        for it in b.get("items", []):
+                            # Best-effort: infer group id from tensor metadata path (not carried here)
+                            # Callers should provide tp_groups and set enforce_tp_superset
+                            gid = None
+                            # No per-item partitioning in plan; skip unless future plan schema adds it
+                            if gid is not None:
+                                groups_in_bucket.add(int(gid))
+                        for gid in groups_in_bucket:
+                            group_ranks = set(int(x) for x in tp_groups.get(str(gid), []))
+                            if group_ranks and not group_ranks.issubset(set(int(x) for x in ranks)):
+                                problems.append({
+                                    "bucket_id": b.get("bucket_id"),
+                                    "error": "consumer_ranks not superset of TP group",
+                                    "group": gid,
+                                })
+                except Exception:
+                    pass
+
+    res = {
+        "buckets": total,
+        "missing_consumer_ranks": missing,
+        "empty_consumer_ranks": empty,
+        "buckets_with_out_of_range": out_of_range,
+        "buckets_with_duplicates": dupes,
+        "problems": problems,
+        "warnings": warnings_,
+        "digest": plan_digest(plan),
+    }
+    return res
 
 
 def assemble_bucket(items: List[dict]) -> np.ndarray:

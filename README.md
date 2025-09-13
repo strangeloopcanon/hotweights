@@ -12,7 +12,7 @@ for a high‑level overview.
 
 ### What It's Great For
 
-*   **Rapidly Updating Inference Models**: Ideal for scenarios where you need to push new model versions (e.g., updated fine-tunes) to a live vLLM cluster with minimal downtime. It achieves this through a combination of delta-based transfers, high-speed transports (MPI/UCX), and asynchronous device-to-host copies that happen in the background. The final commit is a near-instantaneous pointer swap.
+*   **Rapidly Updating Inference Models**: Ideal for scenarios where you need to push new model versions (e.g., updated fine-tunes) to a live vLLM cluster with minimal downtime. It achieves this through a combination of delta-based transfers (Bodo-accelerated), high-speed transports (auto-selected MPI/UCX), and asynchronous device-to-host copies that happen in the background. The final commit is a near-instantaneous pointer swap.
 
 *   **Synchronizing Weights in Distributed Training**: The `adapters.trainer_swap` module is designed to facilitate in-place weight swaps during training. This is valuable for advanced training schemes like reinforcement learning, federated learning, or any algorithm that requires periodically resetting or synchronizing model parameters across a cluster without restarting the training job.
 
@@ -41,10 +41,14 @@ hotweights publish --checkpoint ./example_ckpt --version 2025-09-11
 # Show status (stub)
 hotweights status
 
-# Diff manifests and create a transfer plan
-hotweights plan --prev ./m_prev.json --next ./m_next.json --bucket-mb 64 --output plan.json
+# Diff manifests and create a transfer plan (prev optional)
+# If a coordinator is running, prev is fetched automatically as the current manifest
+hotweights plan --next ./m_next.json --bucket-mb 64 --coord-endpoint tcp://127.0.0.1:5555 --output plan.json
 
-# Optional sanity checks
+# Built-in verification runs by default; to force failure on problems:
+hotweights plan --next ./m_next.json --strict --output plan.json
+
+# Optional: run verification as a separate step
 hotweights verify-plan --plan plan.json --require-consumers || true
 # If you use TP groups:
 # hotweights verify-tp --tp-groups groups.json --world-size 2 || true
@@ -52,16 +56,18 @@ hotweights verify-plan --plan plan.json --require-consumers || true
 # Replicate locally and verify; optionally commit into offline adapter
 hotweights replicate --plan plan.json --verify --commit
 
-# Optional: run a coordinator and workers (ZeroMQ) and use MPI/UCX
+# Optional: run a coordinator and workers (ZeroMQ)
 hotweights coord-serve --endpoint tcp://127.0.0.1:5555 &
 HOTWEIGHTS_COORD=tcp://127.0.0.1:5555 mpirun -n 2 hotweights worker --pinned --no-verify
 
-# With UCX broadcast (set env for ranks)
+# CPU transport selection is automatic (MPI > UCX > local). Example without CUDA:
 export WORLD_SIZE=2 MASTER_ADDR=127.0.0.1 MASTER_PORT=19999
 # Terminal 1 (rank 0):
-RANK=0 hotweights replicate --plan plan.json --ucx --verify
+RANK=0 hotweights replicate --plan plan.json --verify --coord-endpoint tcp://127.0.0.1:5555 --manifest-next ./m_next.json
 # Terminal 2 (rank 1):
-RANK=1 hotweights replicate --plan plan.json --ucx --verify
+RANK=1 hotweights replicate --plan plan.json --verify --coord-endpoint tcp://127.0.0.1:5555
+
+# After commit, the next manifest is recorded as current (for prev-less planning next time).
 ```
 
 ## Tests
@@ -132,6 +138,41 @@ Hotweights exposes Prometheus metrics for core components. If `prometheus_client
   - `hotweights_handles_active` (gauge)
 
 Workers start a Prometheus endpoint on :9099; CLI replicate attempts to start on :9097. You can scrape these from Prometheus directly or via the provided text server endpoints.
+
+## Security (Coordinator)
+
+- Mutating coordinator RPCs (submit_plan, begin, precommit, commit, abort, set_current_manifest) can be guarded by a shared token.
+- Start the coordinator with a token (via your own wrapper) and set `HOTWEIGHTS_COORD_TOKEN` in clients; the CLI forwards it automatically.
+- Keep the coordinator on a trusted network segment or behind an auth proxy for multi-tenant environments.
+
+## Developer Guide
+
+- Code Structure
+  - Core planning: `hotweights/planner_bodo.py` (Bodo JIT when available; pandas fallback), `hotweights/core/replicate.py` (plan helpers, verification, assemble/scatter).
+  - Schemas & errors: `hotweights/core/schemas.py`, `hotweights/core/errors.py`.
+  - Transports: `hotweights/transport/*` with `transport/base.py` protocol and `TransportManager` auto-selection.
+  - Staging: `hotweights/staging/*` with `staging/base.py` protocol; `HostAgent` for CPU, `CudaIPCAgent` for GPU.
+  - Coordinator: `hotweights/coordinator/*` (ZeroMQ REP/PUB server + client, optional HA control plane).
+  - Adapters: `hotweights/adapters/*` (vLLM, trainers) with `adapters/base.py` protocol.
+  - CLI: `hotweights/cli.py` thin front-end that calls core functions.
+
+- Public APIs
+  - Planning: `create_plan(prev, next, bucket_mb, consumer_map)` and `create_plan_from_current(next, provider, ...)` return a `Plan` with `plan_version`.
+  - Verification: `verify_plan(plan, ...)` returns a structured report.
+  - Transports implement `Transport` protocol; staging agents implement `StagingAgent`.
+
+- Types & Contracts
+  - Use the TypedDicts in `core/schemas.py` for Plan/Manifest items; keep plan JSON schema stable and versioned.
+  - Prefer raising `HotweightsError` subclasses for transport/coordinator/validation failures.
+
+- Style & Tooling
+  - Python 3.10+, Black+isort+Ruff; mypy-friendly types across public modules.
+  - Tests: pytest; add unit tests near changed logic; keep CLI thin and delegate logic to core functions for testability.
+
+- Performance Notes
+  - Call `planner_bodo.warmup()` in long-lived processes to amortize Bodo JIT; disabled by `HOTWEIGHTS_NO_WARMUP=1`.
+  - Prefer pinned host buffers (`HostAgent(use_pinned=True)`) for efficient H2D copies.
+
 
 ## Transport Tuning (UCX/MPI)
 

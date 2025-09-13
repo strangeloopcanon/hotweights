@@ -48,8 +48,7 @@ HA Control Plane
 - HOTWEIGHTS_COORD_BACKEND=redis to use Redis; HOTWEIGHTS_REDIS_URL
 - HOTWEIGHTS_HANDLE_TTL seconds; handle acks shorten TTL.
 
-UCX/MPI Fallbacks
+CPU Transport Fallbacks (auto-selected)
 
 - UCX: HOTWEIGHTS_UCX_CHUNK_MB, HOTWEIGHTS_UCX_CONCURRENCY, HOTWEIGHTS_UCX_INFLIGHT_LIMIT_MB, HOTWEIGHTS_UCX_RETRIES, HOTWEIGHTS_UCX_RETRY_DELAY_MS
-- MPI: --window, --mpi-chunk-mb CLI flags
-
+- MPI: --window, --mpi-chunk-mb CLI flags (optional overrides)

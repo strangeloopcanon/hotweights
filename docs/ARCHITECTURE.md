@@ -8,8 +8,8 @@ Hotweights delivers fast, versioned weight updates for LLM serving and training.
 
 ## Flow
 
-1. Publisher posts a new checkpoint and builds manifests (prev/next).
-2. Planner computes delta and packs items into buckets (size‑aware).
+1. Publisher posts a new checkpoint and builds the next manifest. The current (prev) manifest is tracked by the coordinator.
+2. Planner computes delta (prev vs next) and packs items into buckets (size‑aware). Plan includes `plan_version` and a verification report.
 3. Transport replicates: root assembles buckets and broadcasts/IPC shares to consumers.
 4. Workers/adapters load staged shards (CPU→GPU or IPC→device) into shadow storage and commit.
 5. Late joiners fetch missing buckets and join at the next commit.
@@ -51,4 +51,3 @@ Hotweights delivers fast, versioned weight updates for LLM serving and training.
 ## Optional Dependencies
 
 - CUDA/Torch for IPC path; Bodo for planning acceleration; UCX‑Py and mpi4py for fallbacks; pyzmq for control plane; Redis for HA; CuPy + KvikIO for GDS.
-

@@ -7,7 +7,15 @@ import os
 from pathlib import Path
 
 from .manifest import build_simple_manifest, dump_manifest, load_manifest
-from .planner_bodo import compute_delta, pack_buckets
+from .core.replicate import (
+    create_plan as _create_plan_core,
+    create_plan_from_current as _create_plan_from_current,
+    assemble_bucket as _assemble_bucket,
+    scatter_bucket as _scatter_bucket,
+    verify_items as _verify_items,
+    plan_digest as _plan_digest,
+    verify_plan as _verify_plan_core,
+)
 # Legacy imports replaced by SOTA modules
 from .telemetry.metrics import Timer
 from .telemetry.prom import Histogram, start_http_server
@@ -75,149 +83,89 @@ def _cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
-def _create_plan(prev: dict, nxt: dict, bucket_mb: int, consumer_map: dict | None = None) -> dict:
-    import pandas as pd
-    import fnmatch
-
-    def to_df(m):
-        rows = []
-        for t in m["tensors"]:
-            for s in t["shards"]:
-                rows.append(
-                    {
-                        "tensor": t["name"],
-                        "shard_rank": s["rank"],
-                        "nbytes": int(s["bytes"]),
-                        "hash": s["hash"],
-                        "path": t["name"],
-                        "uri": s["uri"],
-                        "dtype": t.get("dtype"),
-                        "shape": t.get("shape"),
-                    }
-                )
-        return pd.DataFrame(rows)
-
-    prev_df = to_df(prev)
-    next_df = to_df(nxt)
-    # map for URIs from next manifest
-    uri_map = { (r.tensor, int(r.shard_rank)): r.uri for r in next_df.itertuples() }
-    dtype_map = { (r.tensor, int(r.shard_rank)): getattr(r, "dtype", None) for r in next_df.itertuples() }
-    shape_map = { (r.tensor, int(r.shard_rank)): getattr(r, "shape", None) for r in next_df.itertuples() }
-    delta = compute_delta(prev_df, next_df)
-    bucket_bytes = int(bucket_mb * (1 << 20))
-    packed = pack_buckets(delta, bucket_bytes=bucket_bytes).reset_index(drop=True)
-
-    # Assign offsets within each bucket and materialize items
-    buckets = {}
-    for row in packed.itertuples():
-        b = int(row.bucket_id)
-        buckets.setdefault(b, {"bucket_id": b, "items": [], "size": 0})
-        off = buckets[b]["size"]
-        key = (row.tensor, int(row.shard_rank))
-        item = {
-            "tensor": row.tensor,
-            "shard_rank": int(row.shard_rank),
-            "nbytes": int(row.nbytes),
-            "hash": row.hash,
-            "uri": str(uri_map.get(key, "")),
-            "dtype": dtype_map.get(key),
-            "shape": shape_map.get(key),
-            "key": f"{row.tensor}:{int(row.shard_rank)}",
-            "offset": int(off),
-        }
-        buckets[b]["items"].append(item)
-        buckets[b]["size"] = off + int(row.nbytes)
-
-    if consumer_map:
-        for b in buckets.values():
-            ranks: set[int] = set()
-            for it in b["items"]:
-                name = it["tensor"]
-                for pat, rlist in consumer_map.items():
-                    try:
-                        if fnmatch.fnmatch(name, pat):
-                            ranks.update(int(x) for x in rlist)
-                    except Exception:
-                        continue
-            if ranks:
-                b["consumer_ranks"] = sorted(ranks)
-
-    plan = {
-        "version": nxt.get("version", "unknown"),
-        "bucket_bytes": bucket_bytes,
-        "total_bytes": int(packed["nbytes"].sum()) if len(packed) else 0,
-        "buckets": [buckets[k] for k in sorted(buckets.keys())],
-    }
-    return plan
+def _load_consumer_map(arg_value: str | None) -> dict | None:
+    if not arg_value:
+        return None
+    try:
+        return json.loads(Path(arg_value).read_text())
+    except Exception as e:
+        print(f"Failed to load group map {arg_value}: {e}")
+        return None
 
 
 def _cmd_plan(args: argparse.Namespace) -> int:
-    prev = load_manifest(args.prev)
-    nxt = load_manifest(args.next)
+    # Optional warmup of planner JIT to reduce first-call latency
+    try:
+        if os.getenv("HOTWEIGHTS_NO_WARMUP", "0") not in ("1", "true", "True"):
+            from . import planner_bodo as _pb
+
+            _pb.warmup()
+    except Exception:
+        pass
     bucket_mb = args.bucket_mb
-    consumer_map = None
-    gmap = getattr(args, "group_map", None) or os.getenv("HOTWEIGHTS_GROUP_MAP")
-    if gmap:
-        try:
-            consumer_map = json.loads(Path(gmap).read_text())
-        except Exception as e:
-            print(f"Failed to load group map {gmap}: {e}")
+    consumer_map = _load_consumer_map(getattr(args, "group_map", None) or os.getenv("HOTWEIGHTS_GROUP_MAP"))
     if args.auto:
         free = min_free_vram_mib()
         if free:
             bucket_mb = max(1, int(free * args.alpha))
             print(f"Auto bucket size MiB: {bucket_mb} (free={free}MiB, alpha={args.alpha})")
-    plan = _create_plan(prev, nxt, bucket_mb=bucket_mb, consumer_map=consumer_map)
+
+    nxt = load_manifest(args.next)
+
+    # Determine prev manifest: explicit --prev, coordinator current, or local cache
+    prev: dict | None = None
+    if getattr(args, "prev", None):
+        prev = load_manifest(args.prev)
+    else:
+        endpoint = getattr(args, "coord_endpoint", None) or os.getenv("HOTWEIGHTS_COORD")
+        c = _maybe_coord_client(endpoint)
+        if c is not None:
+            try:
+                resp = c.call("get_current_manifest")
+                prev = resp.get("manifest") if isinstance(resp, dict) else None
+            except Exception:
+                prev = None
+        if prev is None:
+            # Fallback local cache
+            cache_path = Path(os.path.expanduser("~/.cache/hotweights/current_manifest.json"))
+            if cache_path.exists():
+                try:
+                    prev = json.loads(cache_path.read_text())
+                except Exception:
+                    prev = None
+    if prev is None:
+        print("No previous manifest available. Provide --prev or run a coordinator with a current manifest.")
+        return 1
+
+    plan = _create_plan_core(prev, nxt, bucket_mb=bucket_mb, consumer_map=consumer_map)
+
+    # Built-in verification (default on; use --no-verify to skip, --strict to fail on problems)
+    if not getattr(args, "no_verify", False):
+        ws_env = os.getenv("WORLD_SIZE")
+        world_size = int(ws_env) if (ws_env and ws_env.isdigit()) else None
+        tp_groups = None
+        tp_cfg = os.getenv("HOTWEIGHTS_TP_GROUPS")
+        if tp_cfg:
+            try:
+                if tp_cfg.strip().startswith("{"):
+                    tp_groups = json.loads(tp_cfg)
+                else:
+                    tp_groups = json.loads(Path(tp_cfg).read_text())
+            except Exception:
+                tp_groups = None
+        report = _verify_plan_core(plan, require_consumers=getattr(args, "require_consumers", False), world_size=world_size, tp_groups=tp_groups, enforce_tp_superset=getattr(args, "enforce_tp_superset", False))
+        plan["verification"] = report
+        if report.get("problems") and getattr(args, "strict", False):
+            print(json.dumps(report, indent=2))
+            return 1
+
     out = Path(args.output or "transfer.plan.json")
     out.write_text(json.dumps(plan, indent=2))
     print(f"Wrote plan: {out} ({plan['total_bytes']} bytes across {len(plan['buckets'])} buckets)")
     return 0
 
 
-def _assemble_bucket(items: list[dict]) -> np.ndarray:
-    size = sum(int(x["nbytes"]) for x in items)
-    buf = np.empty(size, dtype=np.uint8)
-    for it in items:
-        uri = it["uri"]
-        assert uri.startswith("file://"), f"Unsupported URI: {uri}"
-        path = Path(uri[len("file://") :])
-        n = int(it["nbytes"])  # expected size
-        # Use memory map to avoid extra copies for large files
-        mm = np.memmap(path, dtype=np.uint8, mode="r")
-        assert mm.shape[0] == n, f"size mismatch for {path}: got {mm.shape[0]}, expect {n}"
-        off = int(it["offset"])  # computed in plan
-        buf[off : off + n] = mm[:n]
-    return buf
-
-
-def _scatter_bucket(host: HostAgent, items: list[dict], buf: np.ndarray) -> None:
-    for it in items:
-        key = it["key"]
-        off = int(it["offset"])
-        n = int(it["nbytes"]) 
-        mv = memoryview(buf)[off : off + n]
-        host.write(key, 0, mv)
-        host.seal(key)
-
-
-def _verify_items(host: HostAgent, items: list[dict]) -> None:
-    import hashlib
-
-    for it in items:
-        algo, expect = it["hash"].split(":", 1)
-        h = hashlib.new(algo)
-        h.update(bytes(host.read(it["key"]))[: int(it["nbytes"])])
-        got = h.hexdigest()
-        assert (
-            got == expect
-        ), f"hash mismatch for {it['key']}: got {got}, expect {expect}"
-
-
-def _plan_digest(plan: dict) -> str:
-    import hashlib
-
-    blob = json.dumps(plan, sort_keys=True).encode("utf-8")
-    return f"sha256:{hashlib.sha256(blob).hexdigest()}"
+# Note: bucket assemble/scatter/verify utilities are imported from core.replicate
 
 
 def _cmd_replicate(args: argparse.Namespace) -> int:
@@ -257,35 +205,46 @@ def _cmd_replicate(args: argparse.Namespace) -> int:
         if args.commit:
             print("Commit hint: Use apply_from_ipc_agent_to_module(agent, items, module, name_map) in your worker for GPU-native commit.")
     else:
-        # Fallback to MPI/UCX streaming overlap path
-        print("CUDA not available; falling back to MPI/UCX path.")
+        # Fallback to auto-selected CPU transport (MPI/UCX) or local
+        print("CUDA not available; selecting CPU transport (auto).")
         from .staging.host_agent import HostAgent
-        from .transport.mpi_stream import MPIReplicator
-        from .transport.ucx_stream import UCXReplicator
+        from .transport.transport_manager import TransportManager
 
         host = HostAgent(use_pinned=False)
         all_items: list[dict] = []
-        replicator = None
-        if getattr(args, "mpi", False):
-            try:
-                win = int(getattr(args, "window", 2))
-                group = None
-                gstr = getattr(args, "group", None) or os.getenv("HOTWEIGHTS_GROUP")
-                if gstr:
-                    group = [int(x) for x in gstr.split(",") if x.strip()]
-                chunk_mb = int(getattr(args, "mpi_chunk_mb", 0))
-                replicator = MPIReplicator(window=win, group_ranks=group, chunk_bytes=(chunk_mb << 20) if chunk_mb > 0 else 0)
-            except Exception as e:
-                print(f"MPI unavailable: {e}")
-                replicator = None
-        elif getattr(args, "ucx", False):
-            try:
-                replicator = UCXReplicator()
-            except Exception as e:
-                print(f"UCX unavailable: {e}")
-                replicator = None
 
-        if replicator is None:
+        # Discover world size and rank for informative behavior
+        world_size = 1
+        rank = 0
+        try:
+            from mpi4py import MPI as _MPI  # type: ignore
+
+            world_size = _MPI.COMM_WORLD.Get_size()
+            rank = _MPI.COMM_WORLD.Get_rank()
+        except Exception:
+            try:
+                ws_env = int(os.getenv("WORLD_SIZE", "1"))
+                rk_env = int(os.getenv("RANK", "0"))
+                world_size, rank = max(1, ws_env), max(0, rk_env)
+            except Exception:
+                world_size, rank = 1, 0
+
+        replicator = None
+        try:
+            preferred = None
+            if getattr(args, "mpi", False):
+                print("[deprecated] --mpi flag: transport is auto-selected now; honoring preference for this run.")
+                preferred = 'mpi'
+            elif getattr(args, "ucx", False):
+                print("[deprecated] --ucx flag: transport is auto-selected now; honoring preference for this run.")
+                preferred = 'ucx'
+            tm = TransportManager(world_size=world_size, rank=rank, auto_select=True, preferred_transport=preferred)
+            replicator = tm.get_replicator()
+        except Exception as e:
+            print(f"Transport auto-selection failed: {e}")
+            replicator = None
+
+        if not replicator or world_size <= 1:
             # Local assemble + scatter
             for b in plan.get("buckets", []):
                 items = b["items"]
@@ -340,9 +299,21 @@ def _cmd_replicate(args: argparse.Namespace) -> int:
 
             c = Client(coord_ep)
             digest = _plan_digest(plan)
-            print(c.call("submit_plan", plan=plan, digest=digest))
-            print(c.call("begin", version=plan.get("version", "unknown"), digest=digest))
-            print(c.call("commit", version=plan.get("version", "unknown")))
+            # Forward optional token via env HOTWEIGHTS_COORD_TOKEN
+            token = os.getenv("HOTWEIGHTS_COORD_TOKEN")
+            print(c.call("submit_plan", plan=plan, digest=digest, token=token))
+            print(c.call("begin", version=plan.get("version", "unknown"), digest=digest, token=token))
+            print(c.call("commit", version=plan.get("version", "unknown"), token=token))
+            # Optionally persist current manifest
+            if getattr(args, "manifest_next", None):
+                try:
+                    nxt_manifest = json.loads(Path(args.manifest_next).read_text())
+                    print(c.call("set_current_manifest", manifest=nxt_manifest, token=os.getenv("HOTWEIGHTS_COORD_TOKEN")))
+                    cache_dir = Path(os.path.expanduser("~/.cache/hotweights"))
+                    cache_dir.mkdir(parents=True, exist_ok=True)
+                    (cache_dir / "current_manifest.json").write_text(json.dumps(nxt_manifest))
+                except Exception as e:
+                    print(f"Failed to persist current manifest: {e}")
         except Exception as e:
             print(f"Coordinator unavailable: {e}")
 
@@ -414,13 +385,16 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=_cmd_status)
 
     # plan
-    sp = sub.add_parser("plan", help="Diff manifests and pack into buckets")
-    sp.add_argument("--prev", required=True, help="Previous manifest path")
+    sp = sub.add_parser("plan", help="Diff manifests and pack into buckets (prev optional via coordinator)")
+    sp.add_argument("--prev", required=False, help="Previous manifest path (optional)")
     sp.add_argument("--next", required=True, help="Next manifest path")
     sp.add_argument("--bucket-mb", type=int, default=512, help="Bucket size in MiB")
     sp.add_argument("--auto", action="store_true", help="Auto size bucket using min free VRAM * alpha")
     sp.add_argument("--alpha", type=float, default=0.25, help="Fraction for auto sizing")
     sp.add_argument("--group-map", default=None, help="JSON file mapping tensor patterns to consumer rank lists")
+    sp.add_argument("--coord-endpoint", default=None, help="ZeroMQ coordinator endpoint for current manifest lookup")
+    sp.add_argument("--no-verify", action="store_true", help="Skip built-in verification")
+    sp.add_argument("--strict", action="store_true", help="Fail if verification finds problems")
     sp.add_argument("--output", default=None, help="Output plan path")
     sp.set_defaults(func=_cmd_plan)
 
@@ -431,9 +405,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--commit", action="store_true", help="Ingest into adapter and commit (offline mode)")
     sp.add_argument("--device", default="cuda", help="Target device for staging and commit")
     sp.add_argument("--coord-endpoint", default=None, help="ZeroMQ coordinator endpoint for begin/commit")
+    sp.add_argument("--manifest-next", default=None, help="Path to next manifest (persist as current after commit)")
     # Fallback options
-    sp.add_argument("--mpi", action="store_true", help="Use MPI broadcast if available (fallback path)")
-    sp.add_argument("--ucx", action="store_true", help="Use UCX broadcast if available (fallback path)")
+    sp.add_argument("--mpi", action="store_true", help=argparse.SUPPRESS)
+    sp.add_argument("--ucx", action="store_true", help=argparse.SUPPRESS)
     sp.add_argument("--verify", action="store_true", help="Verify hashes after staging (fallback path)")
     sp.add_argument("--window", type=int, default=2, help="MPI in-flight buckets window (fallback path)")
     sp.add_argument("--group", default=None, help="Comma-separated ranks for subgroup broadcast (MPI fallback)")
@@ -633,6 +608,24 @@ def build_parser() -> argparse.ArgumentParser:
             print(f"Coordinator unavailable: {e}")
             return 1
     sp.set_defaults(func=_coord_submit)
+
+    # coordinator: set current manifest explicitly
+    sp = sub.add_parser("coord-set-current", help="Set current manifest on coordinator (requires pyzmq)")
+    sp.add_argument("--endpoint", default="tcp://127.0.0.1:5555")
+    sp.add_argument("--manifest", required=True, help="Path to manifest JSON to set as current")
+    def _coord_set_current(a: argparse.Namespace) -> int:
+        try:
+            from .coordinator.zmq_client import Client
+            import json as _json
+            token = os.getenv("HOTWEIGHTS_COORD_TOKEN")
+            c = Client(a.endpoint)
+            m = _json.loads(Path(a.manifest).read_text())
+            print(c.call("set_current_manifest", manifest=m, token=token))
+            return 0
+        except Exception as e:  # pragma: no cover
+            print(f"Coordinator unavailable: {e}")
+            return 1
+    sp.set_defaults(func=_coord_set_current)
 
     # coordinator subscribe (PUB/SUB)
     sp = sub.add_parser("coord-sub", help="Subscribe to coordinator events (requires pyzmq)")
@@ -845,78 +838,15 @@ def build_parser() -> argparse.ArgumentParser:
                     tp_groups = _json.loads(_Path(cfg).read_text())
             except Exception:
                 tp_groups = None
-        problems = []
-        warnings_ = []
-        total = 0
-        missing = 0
-        out_of_range = 0
-        empty = 0
-        dupes = 0
-        # Build manifest tensor->group map if provided
-        tensor_group: dict[str, int] = {}
-        if a.manifest_next:
-            try:
-                man = _json.loads(_Path(a.manifest_next).read_text())
-                for t in man.get("tensors", []):
-                    part = t.get("partitioning") or {}
-                    gid = part.get("tp_group") or part.get("group") or part.get("group_id")
-                    if gid is not None:
-                        tensor_group[str(t.get("name"))] = int(gid)
-            except Exception:
-                pass
-        for b in plan.get("buckets", []):
-            total += 1
-            ranks = b.get("consumer_ranks")
-            if ranks is None:
-                if a.require_consumers:
-                    missing += 1
-                    problems.append({"bucket_id": b.get("bucket_id"), "error": "missing consumer_ranks"})
-                continue
-            if isinstance(ranks, list):
-                if len(ranks) == 0:
-                    empty += 1
-                    warnings_.append({"bucket_id": b.get("bucket_id"), "warning": "empty consumer_ranks"})
-                if len(set(int(x) for x in ranks)) != len(ranks):
-                    dupes += 1
-                    warnings_.append({"bucket_id": b.get("bucket_id"), "warning": "duplicate ranks in consumer_ranks"})
-                if ws is not None:
-                    bad = [int(x) for x in ranks if int(x) < 0 or int(x) >= ws]
-                    if bad:
-                        out_of_range += 1
-                        problems.append({"bucket_id": b.get("bucket_id"), "error": f"ranks out of range [0,{ws-1}]", "bad": bad})
-                if tp_groups and isinstance(tp_groups, dict):
-                    try:
-                        valid = {int(x) for v in tp_groups.values() for x in v}
-                        extra = [int(x) for x in ranks if int(x) not in valid]
-                        if extra:
-                            warnings_.append({"bucket_id": b.get("bucket_id"), "warning": "ranks not in TP groups union", "extra": extra})
-                        # Superset enforcement per tensor group if requested
-                        if a.enforce_tp_superset and tensor_group:
-                            # Find any tensor groups present in this bucket
-                            groups_in_bucket = set()
-                            for it in b.get("items", []):
-                                gid = tensor_group.get(it.get("tensor"))
-                                if gid is not None:
-                                    groups_in_bucket.add(int(gid))
-                            for gid in groups_in_bucket:
-                                group_ranks = set(int(x) for x in tp_groups.get(str(gid), []))
-                                if group_ranks and not group_ranks.issubset(set(int(x) for x in ranks)):
-                                    problems.append({"bucket_id": b.get("bucket_id"), "error": "consumer_ranks not superset of TP group", "group": gid})
-                    except Exception:
-                        pass
-        digest = _plan_digest(plan)
-        result = {
-            "buckets": total,
-            "missing_consumer_ranks": missing,
-            "empty_consumer_ranks": empty,
-            "buckets_with_out_of_range": out_of_range,
-            "buckets_with_duplicates": dupes,
-            "problems": problems,
-            "warnings": warnings_,
-            "digest": digest,
-        }
-        print(_json.dumps(result, indent=2))
-        return 0 if not problems else 1
+        report = _verify_plan_core(
+            plan,
+            require_consumers=a.require_consumers,
+            world_size=ws,
+            tp_groups=tp_groups,
+            enforce_tp_superset=a.enforce_tp_superset,
+        )
+        print(_json.dumps(report, indent=2))
+        return 0 if not report.get("problems") else 1
     sp.set_defaults(func=_cmd_verify_plan)
 
     # verify-tp: validate TP groups mapping against world size

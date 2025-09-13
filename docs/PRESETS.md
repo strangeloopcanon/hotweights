@@ -64,5 +64,4 @@ export HOTWEIGHTS_OPT_ATTENUATION=0.5
 Notes
 
 - The adaptive window publishes current vs recommended window via metrics; use the provided Grafana dashboard to monitor inflight buckets/bytes, congestion risk, and path utilization.
-- For multi-node clusters, pair CUDA-IPC intra-node with UCX or MPI inter-node as needed.
-
+- For multi-node clusters, pair CUDA-IPC intra-node with the auto-selected CPU transport (MPI > UCX) for inter-node traffic.

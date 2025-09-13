@@ -26,7 +26,7 @@ dd if=/dev/zero of=demo_ckpt_b/b.bin bs=1m count=8 >/dev/null 2>&1
 # Publish, plan, and verify
 hotweights publish --checkpoint demo_ckpt_a --version v0 --output m_prev.json
 hotweights publish --checkpoint demo_ckpt_b --version v1 --output m_next.json
-hotweights plan --prev m_prev.json --next m_next.json --bucket-mb 64 --output plan.json
+hotweights plan --next m_next.json --bucket-mb 64 --strict --output plan.json
 hotweights verify-plan --plan plan.json --require-consumers || true
 
 # Replicate (CUDA-IPC preferred); metrics on :9097
@@ -62,7 +62,7 @@ echo "world" > demo_ckpt_b/b.bin
 
 hotweights publish --checkpoint demo_ckpt_a --version v0 --output m_prev.json
 hotweights publish --checkpoint demo_ckpt_b --version v1 --output m_next.json
-hotweights plan --prev m_prev.json --next m_next.json --bucket-mb 8 --output plan.json
+hotweights plan --next m_next.json --bucket-mb 8 --coord-endpoint tcp://127.0.0.1:5555 --strict --output plan.json
 hotweights verify-plan --plan plan.json --world-size 1 || true
 
 # Submit plan and begin
@@ -85,4 +85,3 @@ Notes
 
 - For multi-node deployments, pair CUDA-IPC intra-node with UCX or MPI inter-node as needed; use TP group mappings (docs/TP_GROUPS.md) to scope consumer_ranks.
 - The HA coordinator can be run without Redis; Redis adds durability and TTL cleanup but is optional.
-

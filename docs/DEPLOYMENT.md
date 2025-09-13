@@ -12,6 +12,9 @@ This guide walks through bringing up Hotweights locally, integrating with vLLM, 
 ```
 hotweights coord-serve --endpoint tcp://127.0.0.1:5555 &
 # Metrics: http://localhost:9100/metrics
+## Optional: protect mutating RPCs with a token
+# Export HOTWEIGHTS_COORD_TOKEN in clients; the CLI forwards it automatically.
+# Use a wrapper to pass the token into the server or run the server behind an auth proxy.
 ```
 
 To enable Redis-backed HA state:
@@ -26,7 +29,8 @@ HOTWEIGHTS_COORD_BACKEND=redis HOTWEIGHTS_REDIS_URL=redis://127.0.0.1:6379/0 \
 ```
 hotweights publish --checkpoint ./ckpt_a --version v0 --output m_prev.json
 hotweights publish --checkpoint ./ckpt_b --version v1 --output m_next.json
-hotweights plan --prev m_prev.json --next m_next.json --bucket-mb 64 --output plan.json
+# Prev-less planning: fetches current manifest from coordinator if available
+hotweights plan --next m_next.json --bucket-mb 64 --coord-endpoint tcp://127.0.0.1:5555 --strict --output plan.json
 hotweights coord-submit-plan --endpoint tcp://127.0.0.1:5555 --plan plan.json
 hotweights begin --endpoint tcp://127.0.0.1:5555 --version v1
 ```
@@ -44,10 +48,10 @@ pip install cupy-cuda11x kvikio
 HOTWEIGHTS_USE_GDS=1 hotweights replicate --plan plan.json --device cuda
 ```
 
-## UCX Broadcast Demo (two ranks)
+## Broadcast Demo (two ranks, CPU path)
 ```
 ./scripts/run_ucx_broadcast_demo.sh plan.json
-# WORLD_SIZE/RANK/MASTER_ADDR/MASTER_PORT control rank orchestration
+# Transport is auto-selected (MPI > UCX > local); WORLD_SIZE/RANK/MASTER_ADDR/MASTER_PORT control rank orchestration
 ```
 
 ## Worker Agent (UCX late-join)
@@ -75,7 +79,7 @@ HOTWEIGHTS_USE_GDS=1 hotweights replicate --plan plan.json --device cuda
   ```
 
 ## Tuning & Validation
-- Broadcast: choose MPI (`--mpi`) or UCX (`--ucx`).
+- Broadcast: CPU transport is auto-selected (MPI > UCX > local). UCX/MPI flags are optional overrides for testing.
 - Buckets: plan with `--bucket-mb` or `--auto --alpha`.
 - UCX broadcast: adjust `MASTER_ADDR/PORT`, chunk size in UCXReplicator if needed.
 - Late-join P2P: UCX striping slices shards across donors, adjust concurrency in fetch_ranges_concurrent.

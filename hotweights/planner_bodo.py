@@ -93,3 +93,23 @@ else:
         print("[hotweights] Using pandas implementations (HOTWEIGHTS_FORCE_PANDAS)")
     compute_delta = _compute_delta_pd
     pack_buckets = _pack_buckets_pd
+
+
+def warmup() -> None:
+    """Optional JIT warmup for planner functions.
+
+    Compiles the Bodo JIT versions (when available) using tiny DataFrames to
+    amortize first-call latency in long-lived processes.
+    """
+    try:
+        import pandas as _pd
+        prev = _pd.DataFrame([
+            {"tensor": "t", "shard_rank": 0, "nbytes": 1, "hash": "h0", "path": "t"}
+        ])
+        nxt = _pd.DataFrame([
+            {"tensor": "t", "shard_rank": 0, "nbytes": 1, "hash": "h1", "path": "t"}
+        ])
+        _ = compute_delta(prev, nxt)
+        _ = pack_buckets(nxt, bucket_bytes=8)
+    except Exception:
+        pass
