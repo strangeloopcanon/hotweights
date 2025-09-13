@@ -150,7 +150,8 @@ Workers start a Prometheus endpoint on :9099; CLI replicate attempts to start on
 - Code Structure
   - Core planning: `hotweights/planner_bodo.py` (Bodo JIT when available; pandas fallback), `hotweights/core/replicate.py` (plan helpers, verification, assemble/scatter).
   - Schemas & errors: `hotweights/core/schemas.py`, `hotweights/core/errors.py`.
-  - Transports: `hotweights/transport/*` with `transport/base.py` protocol and `TransportManager` auto-selection.
+- Transports: `hotweights/transport/*` with `transport/base.py` protocol and `TransportManager` auto-selection.
+  - Optional NCCL transport for inter-node GPU broadcast (auto-selected when `torch.distributed` with CUDA is available and `WORLD_SIZE>1`).
   - Staging: `hotweights/staging/*` with `staging/base.py` protocol; `HostAgent` for CPU, `CudaIPCAgent` for GPU.
   - Coordinator: `hotweights/coordinator/*` (ZeroMQ REP/PUB server + client, optional HA control plane).
   - Adapters: `hotweights/adapters/*` (vLLM, trainers) with `adapters/base.py` protocol.
