@@ -902,6 +902,83 @@ def build_parser() -> argparse.ArgumentParser:
         return 0 if not problems else 1
     sp.set_defaults(func=_cmd_verify_tp)
 
+    # bench-hierarchical: synthetic stage timing for NCCL+IPC pipeline (leaders only)
+    sp = sub.add_parser("bench-hierarchical", help="Measure H2D/NCCL/intra-node device copy timings (leaders only)")
+    sp.add_argument("--size-mb", type=int, default=256, help="Total bytes per bucket (MiB)")
+    sp.add_argument("--repeat", type=int, default=3)
+    def _cmd_bench_hier(a: argparse.Namespace) -> int:
+        try:
+            import torch  # type: ignore
+            import torch.distributed as dist  # type: ignore
+        except Exception as e:
+            print(f"Torch with CUDA required: {e}")
+            return 1
+        if not torch.cuda.is_available():
+            print("CUDA not available")
+            return 1
+        # Init dist if needed
+        try:
+            if not dist.is_initialized():
+                dist.init_process_group(backend="nccl")
+        except Exception as e:
+            print(f"Failed to init process group: {e}")
+            return 1
+        ws = dist.get_world_size()
+        rk = dist.get_rank()
+        try:
+            lrank = int(os.getenv("LOCAL_RANK", "0"))
+            lws = int(os.getenv("LOCAL_WORLD_SIZE", "0"))
+        except Exception:
+            lrank, lws = 0, 0
+        # Compute leaders
+        leaders = [0]
+        if lws and ws % lws == 0:
+            leaders = list(range(0, ws, lws))
+        root = min(leaders)
+        group = dist.new_group(ranks=leaders) if len(leaders) > 1 else dist.group.WORLD  # type: ignore[attr-defined]
+        is_leader = (lrank == 0)
+        dev = torch.device("cuda", torch.cuda.current_device())
+        size = max(1, int(a.size_mb)) * (1 << 20)
+        results = []
+        for _ in range(int(a.repeat)):
+            out = {"rank": rk, "is_leader": is_leader, "size_bytes": size}
+            if is_leader:
+                # H2D
+                cpu = torch.empty(size, dtype=torch.uint8, pin_memory=True)
+                gpu = torch.empty(size, dtype=torch.uint8, device=dev)
+                t0 = torch.cuda.Event(enable_timing=True)
+                t1 = torch.cuda.Event(enable_timing=True)
+                t0.record(); gpu.copy_(cpu, non_blocking=True); torch.cuda.synchronize(); t1.record(); t1.synchronize()
+                out["h2d_ms"] = float(t0.elapsed_time(t1))
+                # Inter-node (leaders)
+                t2 = torch.cuda.Event(enable_timing=True)
+                t3 = torch.cuda.Event(enable_timing=True)
+                t2.record()
+                if rk == root:
+                    dist.broadcast(gpu, src=root, group=group)
+                else:
+                    dst = torch.empty(size, dtype=torch.uint8, device=dev)
+                    dist.broadcast(dst, src=root, group=group)
+                    gpu = dst
+                torch.cuda.synchronize(); t3.record(); t3.synchronize()
+                out["inter_ms"] = float(t2.elapsed_time(t3))
+                # Intra-node (proxy: device->device copy) and reload (another copy)
+                dst1 = torch.empty_like(gpu)
+                t4 = torch.cuda.Event(enable_timing=True); t5 = torch.cuda.Event(enable_timing=True)
+                t4.record(); dst1.copy_(gpu, non_blocking=True); torch.cuda.synchronize(); t5.record(); t5.synchronize()
+                out["intra_ms"] = float(t4.elapsed_time(t5))
+                dst2 = torch.empty_like(gpu)
+                t6 = torch.cuda.Event(enable_timing=True); t7 = torch.cuda.Event(enable_timing=True)
+                t6.record(); dst2.copy_(dst1, non_blocking=True); torch.cuda.synchronize(); t7.record(); t7.synchronize()
+                out["reload_ms"] = float(t6.elapsed_time(t7))
+            else:
+                out["skipped"] = True
+            results.append(out)
+        import json as _json
+        print(_json.dumps({"world_size": ws, "results": results}, indent=2))
+        return 0
+    sp.set_defaults(func=_cmd_bench_hier)
+
     return p
 
 

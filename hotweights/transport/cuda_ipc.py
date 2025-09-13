@@ -28,6 +28,7 @@ from ..staging.cuda_ipc_agent import CudaIPCAgent
 from ..coordinator.zmq_client import Client as ZClient
 from .topology_scheduler import TopologyDiscovery, TopologyAwareScheduler
 from ..telemetry.logging import get_logger
+import socket
 
 try:
     import torch
@@ -73,6 +74,9 @@ class CudaIPCTransport:
         # Optional shared secret for handle signing/validation
         tok = os.getenv("HOTWEIGHTS_HANDLE_TOKEN")
         self._handle_token = tok if tok else None
+        # Node identity and handle scope
+        self._node_id = os.getenv("HOTWEIGHTS_NODE_ID") or socket.gethostname()
+        self._handle_scope = 'node' if os.getenv("HOTWEIGHTS_HIERARCHICAL", "0") in ("1", "true", "True") else 'global'
         
         # Concurrency/window tuning
         try:
@@ -137,6 +141,24 @@ class CudaIPCTransport:
             self._local_world_size = int(os.getenv("LOCAL_WORLD_SIZE", "0"))
         except Exception:
             self._local_world_size = 0
+        # Precompute leader group for hierarchical broadcast
+        self._leaders_group = None
+        self._leaders_root = 0
+        if self._hier:
+            try:
+                import torch.distributed as dist  # type: ignore
+                if not dist.is_initialized():
+                    dist.init_process_group(backend="nccl")
+                ws = dist.get_world_size()
+                lws = self._local_world_size or 1
+                if ws >= lws and lws > 0:
+                    leaders = list(range(0, ws, lws))
+                else:
+                    leaders = [0]
+                self._leaders_root = min(leaders)
+                self._leaders_group = dist.new_group(ranks=leaders)
+            except Exception:
+                self._leaders_group = None
 
     async def _replicate_one_bucket(self, bucket: Dict[str, Any], plan: Dict[str, Any]):
         """Handles the replication of a single bucket."""
@@ -152,11 +174,8 @@ class CudaIPCTransport:
                     # Try env init; if it fails, skip hierarchical
                     dist.init_process_group(backend="nccl")
                 is_leader = (self._local_rank == 0)
-                # Determine leader root (min world rank among leaders)
-                if self._local_world_size > 0:
-                    leader_root = 0
-                else:
-                    leader_root = 0
+                group = self._leaders_group if self._leaders_group is not None else dist.group.WORLD  # type: ignore[attr-defined]
+                leader_root = self._leaders_root
                 if is_leader:
                     size = int(bucket.get("size", 0))
                     if self.rank == leader_root:
@@ -166,13 +185,13 @@ class CudaIPCTransport:
                         if gpu_t is None:
                             gpu_t = torch.empty(size, dtype=torch.uint8, device=self.agent.device)  # type: ignore[attr-defined]
                         # broadcast to other leaders
-                        dist.broadcast(gpu_t.view(torch.uint8), src=leader_root)
+                        dist.broadcast(gpu_t.view(torch.uint8), src=leader_root, group=group)
                         # share locally (handle)
                         _ = self.agent.share_from_gpu(bucket_id, gpu_t)
                     else:
                         # receive into a fresh tensor then share locally
                         gpu_t = torch.empty(size, dtype=torch.uint8, device=self.agent.device)  # type: ignore[attr-defined]
-                        dist.broadcast(gpu_t.view(torch.uint8), src=leader_root)
+                        dist.broadcast(gpu_t.view(torch.uint8), src=leader_root, group=group)
                         _ = self.agent.share_from_gpu(bucket_id, gpu_t)
                     used_hier = True
             except Exception:
@@ -211,7 +230,10 @@ class CudaIPCTransport:
         # Best-effort ack to release storage early
         try:
             if self._client is not None:
-                self._client.call("ack_handle", version=version, bucket_id=int(bucket_id))
+                payload = {"version": version, "bucket_id": int(bucket_id), "who": str(self.rank)}
+                if self._handle_scope == 'node':
+                    payload["node"] = self._node_id
+                self._client.call("ack_handle", **payload)
                 try:
                     self._log.debug(f"acked handle bucket={bucket_id} version={version}")
                 except Exception:
@@ -436,7 +458,10 @@ class CudaIPCTransport:
             try:
                 ser = self._serialize_handle(handle)
                 sig = self._sign_payload(ser)
-                _ = self._client.call("post_handle", version=version, bucket_id=int(bucket_id), handle=ser, sig=sig)
+                payload = {"version": version, "bucket_id": int(bucket_id), "handle": ser, "sig": sig}
+                if self._handle_scope == 'node':
+                    payload["node"] = self._node_id
+                _ = self._client.call("post_handle", **payload)
                 return
             except Exception:
                 pass
@@ -453,7 +478,10 @@ class CudaIPCTransport:
             timeout = 10.0
             while elapsed < timeout:
                 try:
-                    resp = self._client.call("get_handle", version=version, bucket_id=int(bucket_id))
+                    payload = {"version": version, "bucket_id": int(bucket_id)}
+                    if self._handle_scope == 'node':
+                        payload["node"] = self._node_id
+                    resp = self._client.call("get_handle", **payload)
                     h = resp.get("handle") if isinstance(resp, dict) else None
                     sig = resp.get("sig") if isinstance(resp, dict) else None
                     if h:

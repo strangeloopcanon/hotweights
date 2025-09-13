@@ -174,6 +174,54 @@ Workers start a Prometheus endpoint on :9099; CLI replicate attempts to start on
   - Call `planner_bodo.warmup()` in long-lived processes to amortize Bodo JIT; disabled by `HOTWEIGHTS_NO_WARMUP=1`.
   - Prefer pinned host buffers (`HostAgent(use_pinned=True)`) for efficient H2D copies.
 
+## Planning Acceleration (Bodo)
+
+Hotweights uses Bodo to accelerate planning on CPU; Bodo does not allocate GPU memory or move tensors.
+
+- What Bodo speeds up
+  - Delta detection: fast join/filter of next vs prev manifests on `(tensor, shard_rank)` and hash, to compute the minimal set of shards to transfer.
+  - Bucket packing: JIT‑compiled first‑fit decreasing to group changed shards into size‑bounded buckets efficiently.
+- What Bodo does not do
+  - No GPU allocation, broadcast, or device copies — those are handled by CUDA‑IPC/NCCL/UCX transports.
+- Behavior
+  - Automatically uses JIT‑compiled paths when Bodo is installed; falls back to pandas if not, or when `HOTWEIGHTS_FORCE_PANDAS=1`.
+  - Optional warm‑up (`planner_bodo.warmup()`) compiles once to avoid first‑use latency in long‑lived processes.
+- Why it matters
+  - Keeps plan computation sub‑second even for large manifests (100k–1M shards), so the control plane never dominates end‑to‑end time.
+  - Enables true delta mode: moving 1–10% of bytes for fine‑tunes can beat end‑to‑end timings even when raw wire speed is similar.
+
+## Validation & Ops
+
+- Checklist
+  - Plan: verify delta% and bucket size vs free VRAM (`hotweights plan --auto --alpha … --strict`).
+  - Replicate: confirm multiple buckets in flight; stable bucket seconds; recommended window reasonable.
+  - Hierarchical: set `HOTWEIGHTS_HIERARCHICAL=1`; ensure `torchrun` provides `WORLD_SIZE/RANK/LOCAL_RANK`.
+  - Security: set `HOTWEIGHTS_COORD_TOKEN` in clients when using a shared coordinator.
+
+- Key knobs
+  - CUDA‑IPC: `HOTWEIGHTS_IPC_INFLIGHT_BUCKETS`, `HOTWEIGHTS_IPC_ADAPT=1`, `HOTWEIGHTS_IPC_COPY_CHUNK_MB`, `HOTWEIGHTS_IPC_COPY_STREAMS`.
+  - Hierarchical: `HOTWEIGHTS_HIERARCHICAL=1`, `HOTWEIGHTS_NODE_ID=<stable_node_name>` (defaults to hostname).
+  - UCX: `HOTWEIGHTS_UCX_NET_DEVICES` (or set `NCCL_IB_HCA`, mirrored to UCX), `HOTWEIGHTS_UCX_CONCURRENCY` (autotunes by world size).
+  - Planner: `HOTWEIGHTS_NO_WARMUP=1` (disable JIT warm-up), `HOTWEIGHTS_FORCE_PANDAS=1` (force pandas fallback).
+
+- Gotchas & remedies
+  - NCCL hangs: verify `MASTER_ADDR/PORT` reachability and consistent CUDA drivers; use `NCCL_DEBUG=INFO`.
+  - Wrong NIC: set `NCCL_IB_HCA` (e.g., `mlx5_0`) or `HOTWEIGHTS_UCX_NET_DEVICES`.
+  - Insufficient VRAM: reduce bucket size (`--bucket-mb` or `--auto --alpha`), or reduce inflight via `HOTWEIGHTS_IPC_INFLIGHT_BUCKETS`.
+  - Mismatched ranks: prefer `torchrun` for correct `WORLD_SIZE/RANK/LOCAL_RANK` export.
+
+### Synthetic Bench (Leaders Only)
+
+Run a quick stage timing benchmark for hierarchical broadcast (leaders only):
+
+```
+HOTWEIGHTS_HIERARCHICAL=1 torchrun --nnodes=2 --nproc-per-node=8 \
+  --rdzv_backend=c10d --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
+  hotweights bench-hierarchical --size-mb 256 --repeat 3
+```
+
+This prints per-rank JSON with H2D (pinned→GPU), inter-node NCCL broadcast among leaders, and device copy proxies for intra-node and reload.
+
 
 ## Transport Tuning (UCX/MPI)
 
