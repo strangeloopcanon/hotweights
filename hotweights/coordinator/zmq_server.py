@@ -32,6 +32,8 @@ class State:
     rpc_total: Dict[str, int] = field(default_factory=dict)
     last_events: Dict[str, Any] = field(default_factory=dict)
     state: str = "idle"  # idle|begun|precommit|committed|aborted
+    # Handle registry: version -> bucket_id -> node_id -> {handle, sig, ts, acks}
+    handles: Dict[str, Dict[int, Dict[str, Dict[str, Any]]]] = field(default_factory=dict)
 
 
 def _derive_pub_endpoint(endpoint: str) -> str:
@@ -178,6 +180,45 @@ def serve(
             st.plan_digest = args.get("digest")
             rep.send_json({"ok": True, "digest": st.plan_digest})
             _pub("plan", {"digest": st.plan_digest, "buckets": len((st.plan or {}).get("buckets", []))})
+        elif method == "post_handle":
+            if not _check_token():
+                rep.send_json({"error": "unauthorized"}); continue
+            version = str(args.get("version") or "_")
+            bucket_id = int(args.get("bucket_id", -1))
+            handle = args.get("handle")
+            sig = args.get("sig")
+            node = str(args.get("node") or "global")
+            ts = time.time()
+            st.handles.setdefault(version, {}).setdefault(bucket_id, {})[node] = {"handle": handle, "sig": sig, "ts": ts, "acks": []}
+            rep.send_json({"ok": True})
+            _pub("handle", {"version": version, "bucket_id": bucket_id, "node": node})
+        elif method == "get_handle":
+            version = str(args.get("version") or "_")
+            bucket_id = int(args.get("bucket_id", -1))
+            node = str(args.get("node") or "global")
+            d = st.handles.get(version, {}).get(bucket_id, {})
+            # prefer node-specific; fallback to global
+            entry = d.get(node) or d.get("global")
+            if entry:
+                rep.send_json({"handle": entry.get("handle"), "sig": entry.get("sig"), "ts": entry.get("ts")})
+            else:
+                rep.send_json({"handle": None})
+        elif method == "ack_handle":
+            if not _check_token():
+                rep.send_json({"error": "unauthorized"}); continue
+            version = str(args.get("version") or "_")
+            bucket_id = int(args.get("bucket_id", -1))
+            node = str(args.get("node") or "global")
+            who = str(args.get("who") or "?")
+            d = st.handles.get(version, {}).get(bucket_id, {})
+            entry = d.get(node) or d.get("global")
+            if entry is not None:
+                acks = entry.setdefault("acks", [])
+                if who not in acks:
+                    acks.append(who)
+                rep.send_json({"ok": True, "acks": len(acks)})
+            else:
+                rep.send_json({"ok": False, "acks": 0})
         elif method == "set_current_manifest":
             if not _check_token():
                 rep.send_json({"error": "unauthorized"}); continue
@@ -218,6 +259,7 @@ def serve(
                 "version": st.version,
                 "current_manifest": bool(st.current_manifest),
                 "plan_digest": st.plan_digest,
+                "handles_versions": list(st.handles.keys()),
                 "have": {str(k): v for k, v in st.have.items()},
                 "precommit_acks": list(st.precommit_acks.keys()),
                 "heartbeats": st.heartbeats,
