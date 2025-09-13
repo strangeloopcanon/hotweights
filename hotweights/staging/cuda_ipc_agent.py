@@ -88,6 +88,17 @@ class CudaIPCAgent:
             except Exception:
                 self._copy_streams_n = 2
         self._copy_streams = [torch.cuda.Stream() for _ in range(self._copy_streams_n)]
+        # Pinned host buffer pool (simple size->tensor cache)
+        self._pinned_pool: dict[int, torch.Tensor] = {}
+
+    def _get_pinned(self, size: int) -> "torch.Tensor":  # type: ignore[name-defined]
+        # Return a pinned host tensor with capacity >= size; simple exact-size cache for now
+        for cap, t in list(self._pinned_pool.items()):
+            if cap >= size:
+                return t
+        t = torch.empty(size, dtype=torch.uint8, pin_memory=True)
+        self._pinned_pool[size] = t
+        return t
 
     def assemble_and_share(self, bucket: Dict[str, Any]) -> Any:
         """(Root Node Only) Assembles a bucket into a new GPU buffer and returns its IPC handle."""
@@ -117,10 +128,21 @@ class CudaIPCAgent:
                 # Fallback to CPU assemble
                 use_gds = False
         if not use_gds:
-            # Assemble via CPU buffer then H2D copy
-            cpu_buffer = np.empty(size, dtype=np.uint8)
-            assemble_bucket_to_buffer(bucket["items"], cpu_buffer)
-            gpu_buffer.copy_(torch.from_numpy(cpu_buffer))
+            # Assemble via pinned host tensor then async H2D copy
+            pinned = self._get_pinned(size)
+            # Fill pinned buffer directly from files
+            for it in bucket["items"]:
+                uri = it["uri"]; assert uri.startswith("file://"), f"Unsupported URI: {uri}"
+                path = uri[len("file://"):]
+                off = int(it["offset"]); n = int(it["nbytes"])  # bytes to read
+                mm = np.memmap(path, dtype=np.uint8, mode="r")
+                assert mm.shape[0] == n, f"size mismatch for {path}: got {mm.shape[0]}, expect {n}"
+                # Copy into pinned using torch view to enable async H2D later
+                dst = pinned[off:off+n]
+                src_t = torch.from_numpy(mm[:n])
+                dst.copy_(src_t)
+            # Async H2D copy
+            gpu_buffer.copy_(pinned.to(self.device, non_blocking=True))
             torch.cuda.synchronize()
         t1.record(); t1.synchronize()
         # Metrics: observe assemble seconds
