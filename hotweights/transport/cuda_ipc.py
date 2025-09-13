@@ -127,13 +127,58 @@ class CudaIPCTransport:
         for i in range(self.world_size):
             self._congestion_windows[i] = 4
         print("CUDA-IPC Transport: Topology initialized (best-effort).")
+        # Hierarchical mode (inter-node NCCL + intra-node IPC)
+        self._hier = os.getenv("HOTWEIGHTS_HIERARCHICAL", "0") in ("1", "true", "True")
+        try:
+            self._local_rank = int(os.getenv("LOCAL_RANK", "0"))
+        except Exception:
+            self._local_rank = 0
+        try:
+            self._local_world_size = int(os.getenv("LOCAL_WORLD_SIZE", "0"))
+        except Exception:
+            self._local_world_size = 0
 
     async def _replicate_one_bucket(self, bucket: Dict[str, Any], plan: Dict[str, Any]):
         """Handles the replication of a single bucket."""
         bucket_id = bucket["bucket_id"]
         version = plan.get("version") or "_"
         t0 = time.perf_counter()
-        if self.rank == 0:
+        # Hierarchical inter-node stage (leaders use NCCL)
+        used_hier = False
+        if self._hier:
+            try:
+                import torch.distributed as dist  # type: ignore
+                if not dist.is_initialized():
+                    # Try env init; if it fails, skip hierarchical
+                    dist.init_process_group(backend="nccl")
+                is_leader = (self._local_rank == 0)
+                # Determine leader root (min world rank among leaders)
+                if self._local_world_size > 0:
+                    leader_root = 0
+                else:
+                    leader_root = 0
+                if is_leader:
+                    size = int(bucket.get("size", 0))
+                    if self.rank == leader_root:
+                        # assemble on root leader
+                        _ = self.agent.assemble_and_share(bucket)
+                        gpu_t = self.agent.get_shared_gpu(bucket_id)
+                        if gpu_t is None:
+                            gpu_t = torch.empty(size, dtype=torch.uint8, device=self.agent.device)  # type: ignore[attr-defined]
+                        # broadcast to other leaders
+                        dist.broadcast(gpu_t.view(torch.uint8), src=leader_root)
+                        # share locally (handle)
+                        _ = self.agent.share_from_gpu(bucket_id, gpu_t)
+                    else:
+                        # receive into a fresh tensor then share locally
+                        gpu_t = torch.empty(size, dtype=torch.uint8, device=self.agent.device)  # type: ignore[attr-defined]
+                        dist.broadcast(gpu_t.view(torch.uint8), src=leader_root)
+                        _ = self.agent.share_from_gpu(bucket_id, gpu_t)
+                    used_hier = True
+            except Exception:
+                used_hier = False
+
+        if not used_hier and self.rank == 0:
             # 1. Root node assembles the bucket directly into its GPU memory via the agent.
             ipc_handle = self.agent.assemble_and_share(bucket)
             
@@ -144,7 +189,7 @@ class CudaIPCTransport:
             
             # 3. Root node also "receives" the data locally.
             self.agent.receive_shared(bucket_id, ipc_handle)
-        else:
+        elif not used_hier:
             # Skip non-consumers entirely
             consumers = bucket.get("consumer_ranks")
             if consumers is not None and isinstance(consumers, list) and int(self.rank) not in [int(x) for x in consumers]:
@@ -161,6 +206,7 @@ class CudaIPCTransport:
 
         # 4. All ranks now have a view into the same GPU memory.
         # They can now scatter the data to their own private staging areas.
+        # 4. Scatter locally; when hierarchical, leaders scatter from their local shared GPU
         self.agent.scatter_from_shared(bucket_id, bucket["items"])
         # Best-effort ack to release storage early
         try:

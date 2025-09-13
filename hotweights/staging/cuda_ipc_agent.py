@@ -156,6 +156,16 @@ class CudaIPCAgent:
         self._shared_buffers[bucket_id] = gpu_buffer
         return ipc.get_ipc_handle(gpu_buffer)
 
+    # --- hierarchical helpers ---
+    def get_shared_gpu(self, bucket_id: int):  # noqa: ANN201
+        """Return the GPU tensor for a previously assembled/shared bucket."""
+        return self._shared_buffers.get(int(bucket_id))
+
+    def share_from_gpu(self, bucket_id: int, gpu_tensor):  # noqa: ANN001, ANN201
+        """Register an existing GPU tensor as the shared buffer and return its IPC handle."""
+        self._shared_buffers[int(bucket_id)] = gpu_tensor
+        return ipc.get_ipc_handle(gpu_tensor)
+
     def receive_shared(self, bucket_id: int, ipc_handle: Any):
         """(Worker Nodes) Opens an IPC handle and stores the memory view."""
         # This provides a zero-copy view into the root node's GPU memory.
