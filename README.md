@@ -222,6 +222,57 @@ HOTWEIGHTS_HIERARCHICAL=1 torchrun --nnodes=2 --nproc-per-node=8 \
 
 This prints per-rank JSON with H2D (pinned→GPU), inter-node NCCL broadcast among leaders, and device copy proxies for intra-node and reload.
 
+## Cluster Install (Quick Paths)
+
+Easiest options to get multi‑GPU/multi‑node runs:
+
+- Conda/dev install (bare metal)
+  - Create the same Conda env on each node (or conda‑pack it):
+    - `conda create -n hw python=3.10 -y && conda activate hw`
+    - Install PyTorch with CUDA matching your driver: see pytorch.org for the right pip/conda command.
+    - `pip install -e .[extras]`
+  - Verify: `python -c "import torch; print(torch.cuda.is_available())"`
+  - Launch with `torchrun` (sets WORLD_SIZE/RANK/LOCAL_RANK).
+
+- Containers (recommended for consistency)
+  - Base image: `nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04`
+  - Install PyTorch (CUDA build) and `hotweights[extras]`.
+  - Run with `--gpus all` and NVIDIA Container Toolkit; orchestrate with your scheduler (K8s/Slurm).
+  - Minimal Dockerfile:
+    ```Dockerfile
+    FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
+    RUN apt-get update && apt-get install -y python3-pip && rm -rf /var/lib/apt/lists/*
+    RUN pip3 install --upgrade pip
+    # Install PyTorch CUDA build (choose matching version from pytorch.org)
+    RUN pip3 install torch --index-url https://download.pytorch.org/whl/cu121
+    # Copy and install hotweights (or pip install from Git)
+    COPY . /opt/hotweights
+    RUN pip3 install -e /opt/hotweights[extras]
+    ENTRYPOINT ["python3", "-m", "hotweights.cli"]
+    ```
+
+- AWS Quickstart
+  - Instance types: p4d/p5 (NVIDIA A100/H100, high bandwidth). Use AWS Deep Learning AMI (DLAMI) or Deep Learning Containers (DLC) with PyTorch.
+  - DLAMI path (Ubuntu):
+    - Launch p4d/p5 with DLAMI (PyTorch). Drivers/CUDA/NCCL are preinstalled.
+    - `conda activate pytorch` (or your env) and `pip install -e .[extras]`.
+  - DLC path (containers): use AWS DLC PyTorch containers with EFA support; mount your code or bake a custom image as above.
+  - Multi‑node: use `torchrun --nnodes` with a reachable `MASTER_ADDR:MASTER_PORT`. For EFA networks, ensure the EFA drivers/Libfabric are present (DLAMI/DLC EFA variants handle this) and set `FI_PROVIDER=efa` if needed.
+
+Minimal launch (2 nodes × 8 GPUs):
+
+```
+export MASTER_ADDR=<rank0-host>
+export MASTER_PORT=29500
+hotweights coord-serve --endpoint tcp://<coord-host>:5555 &
+# Build plan once and share plan.json to all nodes
+hotweights plan --next m_next.json --coord-endpoint tcp://<coord-host>:5555 --strict --output plan.json
+HOTWEIGHTS_HIERARCHICAL=1 torchrun --nnodes=2 --nproc-per-node=8 \
+  --rdzv_backend=c10d --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
+  -m hotweights.cli replicate --plan plan.json --coord-endpoint tcp://<coord-host>:5555
+```
+
+
 
 ## Transport Tuning (UCX/MPI)
 
