@@ -9,12 +9,9 @@ Provides intelligent transport selection based on:
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Type, Union, Callable
+from typing import Any, Optional, Union
 import time
-
-import numpy as np
 
 try:  # optional
     import torch
@@ -61,10 +58,10 @@ class TransportCapabilities:
 @dataclass
 class TransportSelection:
     """Transport selection with rationale."""
-    transport_class: Type
+    transport_class: type
     capabilities: TransportCapabilities
     rationale: str
-    fallback_order: List[Type]
+    fallback_order: list[type]
 
 
 class TransportManager:
@@ -118,9 +115,13 @@ class TransportManager:
         )
     }
     
-    def __init__(self, world_size: int, rank: int, 
-                 auto_select: bool = True,
-                 preferred_transport: Optional[str] = None):
+    def __init__(
+        self,
+        world_size: int,
+        rank: int,
+        auto_select: bool = True,
+        preferred_transport: Optional[str] = None,
+    ) -> None:
         self.world_size = world_size
         self.rank = rank
         self.auto_select = auto_select
@@ -131,18 +132,18 @@ class TransportManager:
         self.scheduler = TopologyAwareScheduler(self.topology)
         
         # Transport instances
-        self._transports: Dict[str, Union[MPIReplicator, UCXReplicator, CudaIPCTransport]] = {}
+        self._transports: dict[str, Union[MPIReplicator, UCXReplicator, CudaIPCTransport]] = {}
         self._active_transport: Optional[str] = None
         
         # Performance monitoring
-        self._transport_performance: Dict[str, List[float]] = {}
-        self._selection_history: List[TransportSelection] = []
+        self._transport_performance: dict[str, list[float]] = {}
+        self._selection_history: list[TransportSelection] = []
         
         # Initialize if auto-selection is enabled
         if auto_select:
             self._discover_and_initialize_transports()
     
-    def _discover_and_initialize_transports(self):
+    def _discover_and_initialize_transports(self) -> None:
         """Discover available transports and initialize them."""
         logger.info(f"Discovering transports for rank {self.rank}/{self.world_size}")
         
@@ -167,14 +168,8 @@ class TransportManager:
                     logger.info("NCCL transport initialized")
             except Exception as e:
                 logger.warning(f"Failed to initialize NCCL: {e}")
-        if cuda_available and nvlink_available and self.world_size <= 16:  # Node-local
-            try:
-                # Note: CudaIPCTransport requires an agent and metrics to operate.
-                # This manager initializes a placeholder; caller should inject real ones.
-                self._transports['cuda_ipc'] = CudaIPCTransport  # store class as placeholder
-                logger.info("CUDA-IPC transport available (placeholder)")
-            except Exception as e:
-                logger.warning(f"Failed to register CUDA-IPC: {e}")
+        # Note: CUDA-IPC requires agent/metrics; construct explicitly where available (CLI/worker).
+        # Avoid registering a placeholder class here to prevent selection of a non-instantiated transport.
         
         if rdma_available:
             try:
@@ -315,11 +310,13 @@ class TransportManager:
         score += min(10.0 / caps.latency_us, 10)  # Up to 10 points for low latency
         score += caps.reliability * 10  # Up to 10 points for reliability
         
-        rationale_parts.extend([
-            f"{caps.max_bandwidth_gbps}Gbps",
-            f"{caps.latency_us}us latency",
-            f"{caps.reliability:.2f} reliability"
-        ])
+        rationale_parts.extend(
+            [
+                f"{caps.max_bandwidth_gbps}Gbps",
+                f"{caps.latency_us}us latency",
+                f"{caps.reliability:.2f} reliability",
+            ]
+        )
         
         # Hardware compatibility
         if caps.supports_cuda and torch and torch.cuda.is_available():
@@ -336,7 +333,7 @@ class TransportManager:
         
         return score, ", ".join(rationale_parts)
     
-    def _get_fallback_order(self, primary_transport: str) -> List[Type]:
+    def _get_fallback_order(self, primary_transport: str) -> list[type]:
         """Get fallback order for transport selection."""
         fallback_map = {
             'nccl': [UCXReplicator, MPIReplicator],
@@ -346,7 +343,7 @@ class TransportManager:
         }
         
         # Filter to only available transports
-        available_fallbacks = []
+        available_fallbacks: list[type] = []
         for transport_class in fallback_map.get(primary_transport, []):
             transport_name = self._get_transport_name(transport_class)
             if transport_name in self._transports:
@@ -354,7 +351,7 @@ class TransportManager:
         
         return available_fallbacks
     
-    def _get_transport_name(self, transport_class: Type) -> str:
+    def _get_transport_name(self, transport_class: type) -> str:
         """Get transport name from class."""
         name_map = {
             NCCLReplicator: 'nccl' if NCCLReplicator is not None else 'unknown',
@@ -374,7 +371,7 @@ class TransportManager:
 
         return self._transports[self._active_transport]
     
-    def replicate(self, bucket_iter) -> None:
+    def replicate(self, bucket_iter: object) -> None:
         """Replicate using the selected transport."""
         replicator = self.get_replicator()
         
@@ -411,19 +408,21 @@ class TransportManager:
                             self._transports[fallback_name].replicate(bucket_iter)
                             return
                     except Exception as fallback_e:
-                        logger.error(f"Fallback transport {fallback_name} also failed: {fallback_e}")
+                        logger.error(
+                            f"Fallback transport {fallback_name} also failed: {fallback_e}"
+                        )
                         continue
             
             # All transports failed
             raise RuntimeError(f"All transports failed for replication: {e}")
     
-    def get_performance_report(self) -> Dict[str, any]:
+    def get_performance_report(self) -> dict[str, Any]:
         """Get performance report for all transports."""
-        report = {
+        report: dict[str, Any] = {
             'active_transport': self._active_transport,
             'available_transports': list(self._transports.keys()),
             'transport_performance': {},
-            'selection_history': []
+            'selection_history': [],
         }
         
         # Transport performance
@@ -433,27 +432,29 @@ class TransportManager:
                     'avg_duration': sum(durations) / len(durations),
                     'min_duration': min(durations),
                     'max_duration': max(durations),
-                    'count': len(durations)
+                    'count': len(durations),
                 }
         
         # Selection history
         for selection in self._selection_history:
-            report['selection_history'].append({
-                'transport': selection.capabilities.name,
-                'rationale': selection.rationale,
-                'timestamp': time.time()
-            })
+            report['selection_history'].append(
+                {
+                    'transport': selection.capabilities.name,
+                    'rationale': selection.rationale,
+                    'timestamp': time.time(),
+                }
+            )
         
         return report
     
-    def __enter__(self):
+    def __enter__(self) -> "TransportManager":
         return self
-    
-    def __exit__(self, exc_type, exc_val, exc_tb):
+
+    def __exit__(self, exc_type: object, exc_val: object, exc_tb: object) -> None:
         # Cleanup transports
         for transport in self._transports.values():
             if hasattr(transport, 'cleanup'):
                 try:
-                    transport.cleanup()
-                except:
+                    transport.cleanup()  # type: ignore[misc]
+                except Exception:
                     pass

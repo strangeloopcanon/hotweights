@@ -13,9 +13,9 @@ Features:
 """
 from __future__ import annotations
 
-from typing import Any, Dict, Tuple, Optional, List
-import os
 import json
+import os
+from typing import Any, Optional
 
 try:
     import torch
@@ -41,7 +41,9 @@ def analyze_compatibility(model_old: torch.nn.Module, model_new: torch.nn.Module
     return 0.1 # Low compatibility otherwise
 
 
-def derive_head_map(num_heads: int, num_kv_heads: Optional[int] = None, order: str = "grouped") -> list[int]:
+def derive_head_map(
+    num_heads: int, num_kv_heads: Optional[int] = None, order: str = "grouped"
+) -> list[int]:
     """Derive head remapping for common GQA patterns.
 
     If KvH divides H and order=="interleaved", return an interleaved list like
@@ -49,22 +51,22 @@ def derive_head_map(num_heads: int, num_kv_heads: Optional[int] = None, order: s
     indices [0..G-1, G..2G-1, ...]. Defaults to grouped if parameters are
     missing or invalid.
     """
-    H = int(num_heads)
-    if num_kv_heads is None or num_kv_heads <= 0 or H <= 0:
-        return list(range(H))
-    KvH = int(num_kv_heads)
-    if H % KvH != 0:
-        return list(range(H))
-    group = H // KvH
+    h = int(num_heads)
+    if num_kv_heads is None or num_kv_heads <= 0 or h <= 0:
+        return list(range(h))
+    kvh = int(num_kv_heads)
+    if h % kvh != 0:
+        return list(range(h))
+    group = h // kvh
     if order.lower() == "interleaved":
         # Interleave heads from each group: 0, G, 1, G+1, ...
         out: list[int] = []
         for i in range(group):
-            for k in range(KvH):
+            for k in range(kvh):
                 out.append(i + k * group)
         return out
     # grouped (default)
-    return [h for k in range(KvH) for h in range(k * group, (k + 1) * group)]
+    return [i for k in range(kvh) for i in range(k * group, (k + 1) * group)]
 
 
 def _maybe_adjust_rope(
@@ -90,7 +92,7 @@ def _maybe_adjust_rope(
 
 def _apply_head_mapping(
     kv_pair: tuple[torch.Tensor, torch.Tensor],
-    head_map: List[int],
+    head_map: list[int],
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Apply a head index remapping on KV tensors if layout is compatible.
 
@@ -101,17 +103,19 @@ def _apply_head_mapping(
     if k.dim() < 3 or v.dim() < 3:
         return k, v
     # Identify head dimension (heuristic: first dim equal to len(head_map) or second if batch present)
-    H = len(head_map)
-    # Find a dimension equal to H
+    h = len(head_map)
+    # Find a dimension equal to h
     try:
         k_dims = list(k.shape)
         v_dims = list(v.shape)
-        if H in (k_dims[0], k_dims[1]) and H in (v_dims[0], v_dims[1]):
-            kh_idx = 0 if k_dims[0] == H else 1
-            vh_idx = 0 if v_dims[0] == H else 1
+        if h in (k_dims[0], k_dims[1]) and h in (v_dims[0], v_dims[1]):
+            kh_idx = 0 if k_dims[0] == h else 1
+            vh_idx = 0 if v_dims[0] == h else 1
             # Build index
-            k_index = [slice(None)] * k.dim(); k_index[kh_idx] = torch.as_tensor(head_map, device=k.device)
-            v_index = [slice(None)] * v.dim(); v_index[vh_idx] = torch.as_tensor(head_map, device=v.device)
+            k_index = [slice(None)] * k.dim()
+            k_index[kh_idx] = torch.as_tensor(head_map, device=k.device)
+            v_index = [slice(None)] * v.dim()
+            v_index[vh_idx] = torch.as_tensor(head_map, device=v.device)
             k = k.index_select(kh_idx, k_index[kh_idx])
             v = v.index_select(vh_idx, v_index[vh_idx])
             return k, v
@@ -120,35 +124,48 @@ def _apply_head_mapping(
     return k, v
 
 
-def _validate_head_map(head_map: List[int], H: int) -> tuple[bool, str]:
+def _validate_head_map(head_map: list[int], h: int) -> tuple[bool, str]:
     try:
-        if not isinstance(head_map, list) or len(head_map) != int(H):
+        if not isinstance(head_map, list) or len(head_map) != int(h):
             return False, "head_map must be a list of length H"
         s = set(int(x) for x in head_map)
-        if s != set(range(int(H))):
+        if s != set(range(int(h))):
             return False, "head_map must be a permutation of 0..H-1"
         return True, "ok"
     except Exception as e:
         return False, f"invalid head_map: {e}"
 
 
-def _extract_model_config(model: torch.nn.Module) -> Dict[str, Any]:
+def _extract_model_config(model: torch.nn.Module) -> dict[str, Any]:
     """Best-effort extraction of model config values used in KV migration.
 
     Looks for common attributes (hidden_size, num_attention_heads, rope_theta/rotary_base, dtype).
     """
-    cfg: Dict[str, Any] = {}
+    cfg: dict[str, Any] = {}
     # Try HuggingFace-like config
     try:
         conf = getattr(model, "config", None)
         if conf is not None:
-            for k in ("hidden_size", "num_attention_heads", "num_key_value_heads", "rope_theta", "rotary_emb_base"):
+            for k in (
+                "hidden_size",
+                "num_attention_heads",
+                "num_key_value_heads",
+                "rope_theta",
+                "rotary_emb_base",
+            ):
                 if hasattr(conf, k):
                     cfg[k] = getattr(conf, k)
     except Exception:
         pass
     # Fallback: attributes on model
-    for k in ("hidden_size", "n_heads", "num_attention_heads", "num_key_value_heads", "rope_theta", "rotary_emb_base"):
+    for k in (
+        "hidden_size",
+        "n_heads",
+        "num_attention_heads",
+        "num_key_value_heads",
+        "rope_theta",
+        "rotary_emb_base",
+    ):
         if hasattr(model, k) and k not in cfg:
             try:
                 cfg[k] = getattr(model, k)
@@ -163,7 +180,7 @@ def _extract_model_config(model: torch.nn.Module) -> Dict[str, Any]:
     return cfg
 
 
-def migrate_kv_cache(
+def migrate_kv_cache(  # noqa: C901
     kv_cache_old: list[tuple[torch.Tensor, torch.Tensor]],
     model_new: torch.nn.Module,
     plan: dict[str, Any],
@@ -184,8 +201,12 @@ def migrate_kv_cache(
 
     print(f"Starting KV-cache migration for {len(kv_cache_old)} layers...")
     cfg = _extract_model_config(model_new)
-    allow_transforms = os.getenv("HOTWEIGHTS_KV_ALLOW_TRANSFORMS", "0") in ("1", "true", "True")
-    
+    allow_transforms = os.getenv("HOTWEIGHTS_KV_ALLOW_TRANSFORMS", "0") in (
+        "1",
+        "true",
+        "True",
+    )
+
     # The core transformation logic would reside here. This is the secret sauce.
     # It would iterate through the plan and apply transformations to the cache
     # tensors based on the changes to the corresponding weight tensors.
@@ -201,8 +222,8 @@ def migrate_kv_cache(
     kv_cache_new = []
     migrated_layers = 0
     # Optional head mapping from env (JSON list of ints or file via HOTWEIGHTS_KV_HEAD_MAP_FILE)
-    head_map: Optional[list[int]] = None
-    head_map_source: Optional[str] = None
+    head_map: list[int] | None = None
+    head_map_source: str | None = None
     try:
         hm = os.getenv("HOTWEIGHTS_KV_HEAD_MAP", "")
         if hm:
@@ -211,7 +232,7 @@ def migrate_kv_cache(
         else:
             hm_file = os.getenv("HOTWEIGHTS_KV_HEAD_MAP_FILE", "")
             if hm_file:
-                with open(hm_file, "r", encoding="utf-8") as f:
+                with open(hm_file, encoding="utf-8") as f:
                     head_map = json.load(f)
                 head_map_source = "file"
     except Exception:
@@ -219,13 +240,13 @@ def migrate_kv_cache(
     # If no explicit head map, derive a safe map based on config
     if head_map is None and allow_transforms:
         try:
-            H = int(cfg.get("num_attention_heads") or cfg.get("n_heads") or 0)
-            KvH = cfg.get("num_key_value_heads")
-            if KvH is not None:
-                KvH = int(KvH)
+            h = int(cfg.get("num_attention_heads") or cfg.get("n_heads") or 0)
+            kvh = cfg.get("num_key_value_heads")
+            if kvh is not None:
+                kvh = int(kvh)
             order = os.getenv("HOTWEIGHTS_KV_HEAD_ORDER", "grouped")
-            if H > 0 and KvH and KvH > 0:
-                head_map = derive_head_map(H, KvH, order=order)
+            if h > 0 and kvh and kvh > 0:
+                head_map = derive_head_map(h, kvh, order=order)
                 head_map_source = f"derived:{order}"
         except Exception:
             head_map = None
@@ -246,9 +267,11 @@ def migrate_kv_cache(
         if allow_transforms:
             k_new, v_new = _maybe_adjust_rope((k_new, v_new), model_new)
             if head_map is not None:
-                # Only apply when a head dimension matches H
-                H = len(head_map)
-                if (H in (k_new.shape[0], k_new.shape[1])) and (H in (v_new.shape[0], v_new.shape[1])):
+                # Only apply when a head dimension matches h
+                h = len(head_map)
+                if (h in (k_new.shape[0], k_new.shape[1])) and (
+                    h in (v_new.shape[0], v_new.shape[1])
+                ):
                     k_new, v_new = _apply_head_mapping((k_new, v_new), head_map)
                     applied_layers += 1
         kv_cache_new.append((k_new, v_new))
@@ -259,13 +282,14 @@ def migrate_kv_cache(
     report = {
         "migrated_layers": migrated_layers,
         "total_layers": len(kv_cache_old),
-        "compatibility_score": analyze_compatibility(model_new, model_new), # Stubbed same-arch score
+        # Stubbed same-arch score
+        "compatibility_score": analyze_compatibility(model_new, model_new),
         "status": "Success (Conservative)",
         "allow_transforms": bool(allow_transforms),
         "config": {k: str(v) for k, v in cfg.items()},
         "head_map_source": head_map_source,
         "head_map_applied_layers": applied_layers,
     }
-    
+
     print("KV-cache migration complete.")
     return kv_cache_new, report

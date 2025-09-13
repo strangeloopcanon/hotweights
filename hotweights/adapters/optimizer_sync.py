@@ -13,21 +13,22 @@ Features:
 """
 from __future__ import annotations
 
-from typing import Any, Dict, Tuple, Optional
+import os
+from typing import Any, Optional
 
 try:
     import torch
-    from torch.optim import Optimizer, Adam, AdamW, SGD
+    from torch.optim import Optimizer
 except Exception:
     torch = None
 
 
 def _transform_adam_state(
     param_new: torch.Tensor,
-    state_old: Dict[str, Any],
-    plan_item: Optional[Dict[str, Any]] = None,
+    state_old: dict[str, Any],
+    plan_item: Optional[dict[str, Any]] = None,
     attenuation: float = 1.0,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Transforms the state for a single parameter for an Adam-like optimizer.
     This is where the core logic for moment transformation would live.
@@ -49,16 +50,18 @@ def _transform_adam_state(
     # Re-initialize moments (zeros) when shapes differ
     return {
         "exp_avg": torch.zeros_like(param_new, memory_format=torch.preserve_format),
-        "exp_avg_sq": torch.zeros_like(param_new, memory_format=torch.preserve_format),
+        "exp_avg_sq": torch.zeros_like(
+            param_new, memory_format=torch.preserve_format
+        ),
     }
 
 
 def sync_optimizer_state(
     optimizer: Optimizer,
     model_new: torch.nn.Module,
-    plan: Dict[str, Any],
-    name_map: Dict[str, str],
-) -> Dict[str, Any]:
+    plan: dict[str, Any],
+    name_map: dict[str, str],
+) -> dict[str, Any]:
     """
     Synchronizes the optimizer state to match the new model parameters.
 
@@ -75,7 +78,7 @@ def sync_optimizer_state(
         raise RuntimeError("PyTorch is required for optimizer synchronization.")
 
     print(f"Synchronizing optimizer state for {type(optimizer).__name__}...")
-    
+
     params_preserved = 0
     params_reinitialized = 0
     params_attenuated = 0
@@ -88,7 +91,9 @@ def sync_optimizer_state(
         attenuation = 1.0
 
     # Build name->param mapping for model_new
-    new_params: Dict[str, torch.Tensor] = {name: p for name, p in model_new.named_parameters() if p.requires_grad}
+    new_params: dict[str, torch.Tensor] = {
+        name: p for name, p in model_new.named_parameters() if p.requires_grad
+    }
 
     # Iterate optimizer params and try to match by name
     with torch.no_grad():
@@ -100,11 +105,20 @@ def sync_optimizer_state(
                     # Heuristic: skip if we can't resolve
                     continue
                 # Find plan item (updated vs not updated)
-                plan_key = next((k for k, v in name_map.items() if v == param_name), None)
+                plan_key = next(
+                    (k for k, v in name_map.items() if v == param_name), None
+                )
                 plan_item = None
                 if plan_key:
                     for bucket in plan.get("buckets", []):
-                        x = next((i for i in bucket.get("items", []) if i.get("key") == plan_key), None)
+                        x = next(
+                            (
+                                i
+                                for i in bucket.get("items", [])
+                                if i.get("key") == plan_key
+                            ),
+                            None,
+                        )
                         if x is not None:
                             plan_item = x
                             break
@@ -114,7 +128,9 @@ def sync_optimizer_state(
                 # Preserve by default for unchanged params
                 if not was_updated or policy == "preserve":
                     try:
-                        new_state = _transform_adam_state(p, state_old, plan_item, attenuation=1.0)
+                        new_state = _transform_adam_state(
+                            p, state_old, plan_item, attenuation=1.0
+                        )
                         optimizer.state[p] = new_state if new_state else {}
                         params_preserved += 1
                     except Exception:
@@ -122,7 +138,9 @@ def sync_optimizer_state(
                         params_reinitialized += 1
                 elif policy == "attenuate":
                     try:
-                        new_state = _transform_adam_state(p, state_old, plan_item, attenuation=attenuation)
+                        new_state = _transform_adam_state(
+                            p, state_old, plan_item, attenuation=attenuation
+                        )
                         optimizer.state[p] = new_state if new_state else {}
                         # Count as attenuated when we changed moments
                         params_attenuated += 1 if new_state else 0

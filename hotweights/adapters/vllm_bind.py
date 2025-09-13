@@ -13,7 +13,8 @@ from __future__ import annotations
 import os
 import threading
 import time
-from typing import Callable, Dict, Optional
+from collections.abc import Callable
+from typing import Optional
 
 try:
     import torch  # type: ignore
@@ -21,13 +22,12 @@ except Exception:  # pragma: no cover
     torch = None  # type: ignore
 
 from ..coordinator.zmq_client import Client
-from .vllm_plugin import update_weights_from_coordinator
 from .vllm_ext import apply_from_ipc_agent_to_module
 from .vllm_pause import pause_requests, resume_requests
 from ..telemetry.prom import Counter, Gauge, start_http_server
 
 
-def _extract_module(obj) -> object:  # noqa: ANN001
+def _extract_module(obj: object) -> object:  # noqa: ANN001
     # common vLLM structures: engine.model_executor?.model_runner?.model
     for path in (
         "model",
@@ -53,7 +53,7 @@ class HotweightsVLLMBinding:
     def __init__(
         self,
         obj,
-        name_map: Dict[str, str] | Callable[[dict], Dict[str, str]] | None,
+        name_map: dict[str, str] | Callable[[dict], dict[str, str]] | None,
         endpoint: str,
         use_kv_migration: bool = True, # Use SOTA feature by default
         device: str = "cuda",
@@ -97,7 +97,11 @@ class HotweightsVLLMBinding:
 
     def _loop(self) -> None:
         c = Client(self.endpoint)
-        worker_id = os.getenv("VLLM_WORKER_ID") or os.getenv("WORKER_ID") or f"pid:{os.getpid()}"
+        worker_id = (
+            os.getenv("VLLM_WORKER_ID")
+            or os.getenv("WORKER_ID")
+            or f"pid:{os.getpid()}"
+        )
         while not self._stop.is_set():
             try:
                 st = c.call("status")
@@ -108,11 +112,15 @@ class HotweightsVLLMBinding:
                     old_cache = None
                     if self.use_kv_migration:
                         try:
-                            # This path is highly dependent on vLLM internal structure
+                            # This path is highly dependent on vLLM internals
                             old_cache = self.obj.model_runner.gpu_cache
-                            print("Successfully extracted old KV-cache for migration.")
+                            print(
+                                "Successfully extracted old KV-cache for migration."
+                            )
                         except AttributeError:
-                            print("Warning: Could not extract KV-cache. Skipping migration.")
+                            print(
+                                "Warning: Could not extract KV-cache. Skipping migration."
+                            )
                             old_cache = None
 
                     try:
@@ -124,7 +132,11 @@ class HotweightsVLLMBinding:
                         # Here we will focus on the commit-time logic: KV migration and weight swap.
                         print("Applying new weights to model...")
                         # GPU-native commit via CudaIPCAgent if available and enabled
-                        use_ipc = os.getenv("HOTWEIGHTS_USE_IPC_AGENT", "0") in ("1", "true", "True")
+                        use_ipc = os.getenv("HOTWEIGHTS_USE_IPC_AGENT", "0") in (
+                            "1",
+                            "true",
+                            "True",
+                        )
                         agent = getattr(self.obj, "hotweights_agent", None)
                         if use_ipc and agent is not None:
                             # Aggregate plan items
@@ -136,15 +148,28 @@ class HotweightsVLLMBinding:
                                 name_map = self.name_map
                             else:
                                 # Best effort: identity-like map using normalized tensor names
-                                name_map = {it["key"]: it["tensor"].replace("/", ".").rsplit(".", 1)[0] for it in items}
-                            apply_from_ipc_agent_to_module(items, agent, self.module, name_map, device=self.device)
+                                name_map = {
+                                    it["key"]: it["tensor"]
+                                    .replace("/", ".")
+                                    .rsplit(".", 1)[0]
+                                    for it in items
+                                }
+                            apply_from_ipc_agent_to_module(
+                                items,
+                                agent,
+                                self.module,
+                                name_map,
+                                device=self.device,
+                            )
                         else:
                             # Fallback: assume worker performed the apply
                             pass
 
                         if old_cache and self.use_kv_migration:
                             from .kv_cache_migration import migrate_kv_cache
-                            new_cache, report = migrate_kv_cache(old_cache, self.module, plan)
+                            new_cache, report = migrate_kv_cache(
+                                old_cache, self.module, plan
+                            )
                             print(f"KV-cache migration report: {report}")
                             # This path is also highly dependent on vLLM internals
                             self.obj.model_runner.set_gpu_cache(new_cache)
@@ -167,7 +192,7 @@ class HotweightsVLLMBinding:
 
 def bind_to_vllm(
     engine_or_runner,
-    name_map: Dict[str, str] | Callable[[dict], Dict[str, str]] | None,
+    name_map: dict[str, str] | Callable[[dict], dict[str, str]] | None,
     endpoint: str = "tcp://127.0.0.1:5555",
     use_kv_migration: bool = True,
     device: str = "cuda",

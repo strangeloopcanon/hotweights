@@ -25,6 +25,11 @@ dist/
 bench.json
 demo_ckpt_*/
 demo_ucx_ckpt_*/
+manifest_*.json
+plan.json
+transfer.plan.json
+m_prev.json
+m_next.json
 
 # Project-local docs (do not commit)
 idea.md
