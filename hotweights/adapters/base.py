@@ -1,11 +1,11 @@
 """Adapter protocol for server-plane integrations (vLLM, trainers)."""
 from __future__ import annotations
 
-from typing import Protocol, Dict, List
+from typing import Any, Protocol
 
 
 class HotweightsAdapter(Protocol):
-    def begin_update(self, version: str, manifest: Dict) -> None:
+    def begin_update(self, version: str, manifest: dict[str, Any]) -> None:
         ...
 
     def request_buffer(self, tensor: str, shard_rank: int, nbytes: int):  # noqa: ANN201
@@ -19,4 +19,3 @@ class HotweightsAdapter(Protocol):
 
     def commit(self, version: str) -> None:
         ...
-

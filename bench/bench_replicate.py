@@ -23,10 +23,15 @@ def run_once(plan_path: Path, verify: bool = True, pinned: bool = False) -> dict
             _verify_items(host, items)
         buckets += 1
     dt = time.perf_counter() - t0
-    return {"seconds": dt, "bytes": bytes_total, "buckets": buckets, "throughput_bps": (bytes_total / dt) if dt > 0 else 0}
+    return {
+        "seconds": dt,
+        "bytes": bytes_total,
+        "buckets": buckets,
+        "throughput_bps": (bytes_total / dt) if dt > 0 else 0,
+    }
 
 
-def main():
+def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("plan", type=Path)
     ap.add_argument("--repeat", type=int, default=3)
@@ -35,15 +40,17 @@ def main():
     args = ap.parse_args()
     results = []
     for _ in range(args.repeat):
-        results.append(run_once(args.plan, verify=not args.no_verify, pinned=args.pinned))
+        results.append(
+            run_once(args.plan, verify=not args.no_verify, pinned=args.pinned)
+        )
     out = {
         "runs": results,
         "avg_seconds": sum(r["seconds"] for r in results) / len(results),
-        "avg_throughput_bps": sum(r["throughput_bps"] for r in results) / len(results),
+        "avg_throughput_bps": sum(r["throughput_bps"] for r in results)
+        / len(results),
     }
     print(json.dumps(out, indent=2))
 
 
 if __name__ == "__main__":
     main()
-
