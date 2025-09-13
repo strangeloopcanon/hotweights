@@ -31,6 +31,10 @@ try:
 except Exception:
     ucp = None
 
+try:
+    from .nccl_stream import NCCLReplicator
+except Exception:
+    NCCLReplicator = None  # type: ignore
 from .mpi_stream import MPIReplicator
 from .ucx_stream import UCXReplicator
 from .cuda_ipc import CudaIPCTransport
@@ -68,6 +72,17 @@ class TransportManager:
     
     # Define transport capabilities
     TRANSPORT_CAPS = {
+        'nccl': TransportCapabilities(
+            name='NCCL',
+            supports_cuda=True,
+            supports_rdma=True,
+            supports_nvlink=True,
+            max_bandwidth_gbps=250.0,
+            latency_us=5.0,
+            scalability='cluster',
+            reliability=0.92,
+            setup_overhead=0.5
+        ),
         'cuda_ipc': TransportCapabilities(
             name='CUDA-IPC',
             supports_cuda=True,
@@ -144,6 +159,14 @@ class TransportManager:
         logger.info(f"Transport discovery: CUDA={cuda_available}, NVLink={nvlink_available}, RDMA={rdma_available}, MPI={mpi_available}")
         
         # Initialize available transports
+        # NCCL (inter-node GPU broadcast)
+        if self._check_nccl_availability():
+            try:
+                if NCCLReplicator is not None:
+                    self._transports['nccl'] = NCCLReplicator()
+                    logger.info("NCCL transport initialized")
+            except Exception as e:
+                logger.warning(f"Failed to initialize NCCL: {e}")
         if cuda_available and nvlink_available and self.world_size <= 16:  # Node-local
             try:
                 # Note: CudaIPCTransport requires an agent and metrics to operate.
@@ -210,6 +233,23 @@ class TransportManager:
             return comm.Get_size() > 1
         except:
             return False
+
+    def _check_nccl_availability(self) -> bool:
+        """Check if NCCL is likely available via torch.distributed."""
+        try:
+            import torch
+            import torch.distributed as dist  # noqa: F401
+        except Exception:
+            return False
+        if not torch.cuda.is_available():
+            return False
+        # If world size is 1, skip NCCL
+        try:
+            from os import getenv
+            ws = int(getenv('WORLD_SIZE', '1'))
+        except Exception:
+            ws = 1
+        return ws > 1
     
     def _select_optimal_transport(self) -> TransportSelection:
         """Select the optimal transport based on capabilities and requirements."""
@@ -299,6 +339,7 @@ class TransportManager:
     def _get_fallback_order(self, primary_transport: str) -> List[Type]:
         """Get fallback order for transport selection."""
         fallback_map = {
+            'nccl': [UCXReplicator, MPIReplicator],
             'cuda_ipc': [UCXReplicator, MPIReplicator],
             'ucx': [CudaIPCTransport, MPIReplicator],
             'mpi': [UCXReplicator, CudaIPCTransport]
@@ -316,6 +357,7 @@ class TransportManager:
     def _get_transport_name(self, transport_class: Type) -> str:
         """Get transport name from class."""
         name_map = {
+            NCCLReplicator: 'nccl' if NCCLReplicator is not None else 'unknown',
             CudaIPCTransport: 'cuda_ipc',
             UCXReplicator: 'ucx',
             MPIReplicator: 'mpi'

@@ -44,6 +44,13 @@ class UCXReplicator(Transport):
         self.world_size = int(os.getenv("WORLD_SIZE", "1"))
         self.master_addr = os.getenv("MASTER_ADDR", "127.0.0.1")
         self.master_port = int(os.getenv("MASTER_PORT", "19999"))
+        # NIC binding (mirror NCCL_IB_HCA semantics if present)
+        try:
+            hca = os.getenv("HOTWEIGHTS_UCX_NET_DEVICES") or os.getenv("NCCL_IB_HCA")
+            if hca:
+                os.environ.setdefault("UCX_NET_DEVICES", hca)
+        except Exception:
+            pass
         # env-tunable chunk size
         try:
             mb = int(os.getenv("HOTWEIGHTS_UCX_CHUNK_MB", str(self.chunk_bytes >> 20)))
@@ -56,6 +63,16 @@ class UCXReplicator(Transport):
             self.send_concurrency = max(0, conc)
         except Exception:
             self.send_concurrency = 0
+        # Autotune basic concurrency if not set
+        if self.send_concurrency == 0:
+            try:
+                # Favor small fanout to reduce head-of-line blocking
+                if self.world_size >= 8:
+                    self.send_concurrency = 4
+                elif self.world_size >= 4:
+                    self.send_concurrency = 2
+            except Exception:
+                pass
         # inflight limit (MB) maps to max peers per chunk based on chunk size
         try:
             inflight_mb = int(os.getenv("HOTWEIGHTS_UCX_INFLIGHT_LIMIT_MB", "0"))
