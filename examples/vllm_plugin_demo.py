@@ -10,11 +10,11 @@ except Exception:
     torch = None
 
 from hotweights.adapters.vllm_plugin import update_weights_from_coordinator
-from hotweights.manifest import build_simple_manifest, dump_manifest
-from hotweights.cli import _create_plan
+from hotweights.core.replicate import create_plan as _create_plan
+from hotweights.manifest import build_simple_manifest
 
 
-def main():
+def main() -> None:
     if torch is None:
         print("Torch not available; demo skipped")
         return
@@ -32,7 +32,7 @@ def main():
 
     # Start a local apply using the plugin API without a coordinator by faking get_plan
     class FakeClient:
-        def call(self, method, **kw):  # noqa: ANN001
+        def call(self, method, **kw):  # noqa: ANN001, ANN202, ANN003
             if method == "get_plan":
                 return {"plan": plan, "digest": "demo"}
             raise RuntimeError("not implemented")
@@ -42,17 +42,18 @@ def main():
 
     model = nn.Linear(2, 2, bias=False)
 
-    def name_map_fn(p):  # noqa: ANN001
+    def name_map_fn(p):  # noqa: ANN001, ANN202
         mapping = {}
         for b in p["buckets"]:
             for it in b["items"]:
                 mapping[it["key"]] = "weight"
         return mapping
 
-    update_weights_from_coordinator(model, name_map_fn, use_mpi=False, pinned=True, verify=True, device="cpu")
+    update_weights_from_coordinator(
+        model, name_map_fn, use_mpi=False, pinned=True, verify=True, device="cpu"
+    )
     print("Applied weights:", model.weight.detach().numpy())
 
 
 if __name__ == "__main__":
     main()
-

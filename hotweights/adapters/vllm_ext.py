@@ -23,7 +23,9 @@ class HotReloadExtension:
         self._map: dict[str, str] = {}
         self._host_buffers: dict[str, memoryview] = {}
         self._pinned: dict[str, object] = {}
-        self._h2d_hist = Histogram("hotweights_adapter_h2d_seconds", "H2D copy time per shard")
+        self._h2d_hist = Histogram(
+            "hotweights_adapter_h2d_seconds", "H2D copy time per shard"
+        )
 
     def begin_update(self, version: str, manifest: dict) -> None:  # noqa: ANN001
         self.version = version
@@ -68,7 +70,10 @@ class HotReloadExtension:
                 if isinstance(src, torch.Tensor) and src.dtype == torch.uint8:
                     view_dst[:nbytes].copy_(src[:nbytes])
                 else:
-                    view_dst[:nbytes].copy_(torch.frombuffer(bytearray(mv.tobytes()), dtype=torch.uint8)[:nbytes])
+                    src_buf = torch.frombuffer(  # type: ignore[attr-defined]
+                        bytearray(mv.tobytes()), dtype=torch.uint8
+                    )
+                    view_dst[:nbytes].copy_(src_buf[:nbytes])
                 if torch.cuda.is_available():
                     param.data.copy_(cpu_t.to(param.data.device, non_blocking=True))
                 else:
@@ -78,9 +83,13 @@ class HotReloadExtension:
             # fallback: store to shadow as bytes
             data = bytes(mv)
             if torch is not None:
-                self.shadow[key] = torch.frombuffer(bytearray(data), dtype=torch.uint8).clone()
+                self.shadow[key] = torch.frombuffer(  # type: ignore[attr-defined]
+                    bytearray(data), dtype=torch.uint8
+                ).clone()
             else:
-                self.shadow[key] = np.frombuffer(bytearray(data), dtype=np.uint8).copy()
+                self.shadow[key] = np.frombuffer(
+                    bytearray(data), dtype=np.uint8
+                ).copy()
 
     def precommit(self) -> None:
         if torch is not None and hasattr(torch, "cuda") and torch.cuda.is_available():
@@ -178,7 +187,7 @@ class HotReloadExtension:
         use_cuda = device.startswith("cuda") and torch.cuda.is_available()
         dev = torch.device(device) if use_cuda else torch.device("cpu")
         stream = torch.cuda.Stream() if use_cuda else None
-        with torch.cuda.stream(stream) if stream else _nullcontext():
+        with torch.cuda.stream(stream) if stream else NullContext():
             for it in items:
                 key = it["key"]
                 target = name_map.get(key)
@@ -193,22 +202,36 @@ class HotReloadExtension:
                 param = getattr(mod, pname)
                 dtype_str = (it.get("dtype") or "uint8").replace("|", "")
                 t_dtype = torch_dtype_from_numpy_str(dtype_str) or param.data.dtype
-                shape = tuple(int(x) for x in (it.get("shape") or list(param.data.shape)))
+                shape = tuple(
+                    int(x) for x in (it.get("shape") or list(param.data.shape))
+                )
                 # source pinned bytes
                 src_bytes = getattr(host, "torch_tensor", lambda *_: None)(key)
                 if src_bytes is None:
-                    # fallback: from bytes
+                    # Fallback: construct a typed CPU tensor via NumPy, then copy.
                     data = bytes(host.read(key))[: int(it["nbytes"]) ]
-                    cpu_t = torch.frombuffer(bytearray(data), dtype=torch.uint8)
+                    try:
+                        np_dtype = __import__("numpy").dtype(dtype_str)  # lazy import
+                    except Exception:
+                        np_dtype = __import__("numpy").dtype("uint8")
+                    np_arr = __import__("numpy").frombuffer(  # type: ignore[attr-defined]
+                        bytearray(data), dtype=np_dtype
+                    ).reshape(shape)
+                    cpu_typed = torch.from_numpy(np_arr).clone()
                 else:
-                    cpu_t = src_bytes
-                # materialize typed pinned tensor
-                cpu_typed = torch.empty(shape, dtype=t_dtype, pin_memory=True)
-                # copy raw bytes into dst view
-                view_dst = cpu_typed.view(torch.uint8)
-                view_src = cpu_t if cpu_t.dtype == torch.uint8 else cpu_t.view(torch.uint8)
-                n = int(it["nbytes"])  # expected bytes
-                view_dst[:n].copy_(view_src[:n])
+                    # materialize typed host tensor; only pin when using CUDA
+                    cpu_typed = torch.empty(
+                        shape, dtype=t_dtype, pin_memory=use_cuda
+                    )
+                    # copy raw bytes into dst view; best-effort path
+                    view_dst = cpu_typed.view(torch.uint8)
+                    view_src = (
+                        src_bytes
+                        if src_bytes.dtype == torch.uint8
+                        else src_bytes.view(torch.uint8)
+                    )
+                    n = int(it["nbytes"])  # expected bytes
+                    view_dst[:n].copy_(view_src[:n])
                 # async H2D copy into param
                 if use_cuda:
                     param.data.copy_(cpu_typed.to(dev, non_blocking=True))
@@ -218,15 +241,21 @@ class HotReloadExtension:
             stream.synchronize()
 
 
-class _nullcontext:  # pragma: no cover - simple helper if no torch.cuda.stream
-    def __enter__(self):  # noqa: ANN001
+class NullContext:  # pragma: no cover - simple helper if no torch.cuda.stream
+    def __enter__(self) -> "NullContext":  # noqa: ANN001
         return self
 
-    def __exit__(self, *exc):  # noqa: ANN001, ANN201
+    def __exit__(self, *exc: object) -> bool:  # noqa: ANN001
         return False
 
 
-def apply_from_ipc_agent_to_module(items: list[dict], agent, module, name_map: dict[str, str], device: str = "cuda") -> None:  # noqa: ANN001, ANN201
+def apply_from_ipc_agent_to_module(
+    items: list[dict],
+    agent,
+    module,
+    name_map: dict[str, str],
+    device: str = "cuda",
+) -> None:  # noqa: ANN001, ANN201
     """Apply staged tensors from a CUDA-IPC agent into a torch.nn.Module.
 
     - items: list of plan items with key/shape/dtype fields
@@ -239,7 +268,7 @@ def apply_from_ipc_agent_to_module(items: list[dict], agent, module, name_map: d
         raise RuntimeError("Torch is required for GPU in-place apply")
     use_cuda = device.startswith("cuda") and torch.cuda.is_available()
     stream = torch.cuda.Stream() if use_cuda else None
-    with torch.cuda.stream(stream) if stream else _nullcontext():
+    with torch.cuda.stream(stream) if stream else NullContext():
         for it in items:
             key = it["key"]
             target = name_map.get(key)
@@ -256,9 +285,17 @@ def apply_from_ipc_agent_to_module(items: list[dict], agent, module, name_map: d
             pname = parts[-1]
             param = getattr(mod, pname)
             # Copy directly on device if possible; otherwise move
-            if src.device == param.data.device and src.dtype == param.data.dtype and src.shape == param.data.shape:
+            same_dev = src.device == param.data.device
+            same_dtype = src.dtype == param.data.dtype
+            same_shape = src.shape == param.data.shape
+            if same_dev and same_dtype and same_shape:
                 param.data.copy_(src, non_blocking=True)
             else:
-                param.data.copy_(src.to(device=param.data.device, dtype=param.data.dtype, non_blocking=True).reshape_as(param.data))
+                tmp = src.to(
+                    device=param.data.device,
+                    dtype=param.data.dtype,
+                    non_blocking=True,
+                )
+                param.data.copy_(tmp.reshape_as(param.data))
     if stream is not None:
         stream.synchronize()

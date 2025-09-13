@@ -6,13 +6,13 @@ start a background HotweightsVLLMBinding after the engine is constructed.
 """
 from __future__ import annotations
 
-from typing import Callable, Dict, Optional
+from collections.abc import Callable
 
 from .vllm_bind import bind_to_vllm
 
 
 def install_autobind(
-    name_map: Dict[str, str] | Callable[[dict], Dict[str, str]] | None,
+    name_map: dict[str, str] | Callable[[dict], dict[str, str]] | None,
     endpoint: str = "tcp://127.0.0.1:5555",
     use_mpi: bool = False,
     pinned: bool = True,
@@ -25,27 +25,27 @@ def install_autobind(
     Returns True if vLLM engines were patched, False otherwise.
     """
     try:
-        from vllm.engine.async_llm_engine import AsyncLLMEngine  # type: ignore
+        from vllm.engine.async_llm_engine import AsyncLLMEngine as async_engine_cls  # type: ignore
     except Exception:
-        AsyncLLMEngine = None  # type: ignore
+        async_engine_cls = None  # type: ignore
     try:
-        from vllm.engine.llm_engine import LLMEngine  # type: ignore
+        from vllm.engine.llm_engine import LLMEngine as llm_engine_cls  # type: ignore
     except Exception:
-        LLMEngine = None  # type: ignore
+        llm_engine_cls = None  # type: ignore
 
     patched = False
 
-    def _patch(cls):  # noqa: ANN001
+    def _patch(cls: object) -> None:
         nonlocal patched
         if cls is None:
             return
         if getattr(cls, "_hotweights_patched", False):
             patched = True
             return
-        orig_init = cls.__init__
+        orig_init = cls.__init__  # type: ignore[attr-defined]
 
-        def _init(self, *args, **kwargs):  # noqa: ANN001, ANN202
-            orig_init(self, *args, **kwargs)
+        def _init(self, *args: object, **kwargs: object) -> None:  # noqa: ANN001
+            orig_init(self, *args, **kwargs)  # type: ignore[misc]
             try:
                 # Avoid double-binding
                 if getattr(self, "_hotweights_binding", None) is None:
@@ -59,16 +59,15 @@ def install_autobind(
                         device=device,
                         poll_interval=poll_interval,
                     )
-                    setattr(self, "_hotweights_binding", b)
+                    self._hotweights_binding = b  # type: ignore[attr-defined]
             except Exception:
                 # best-effort; never fail engine init
                 pass
 
         cls.__init__ = _init  # type: ignore[assignment]
-        setattr(cls, "_hotweights_patched", True)
+        cls._hotweights_patched = True  # type: ignore[attr-defined]
         patched = True
 
-    _patch(AsyncLLMEngine)
-    _patch(LLMEngine)
+    _patch(async_engine_cls)
+    _patch(llm_engine_cls)
     return patched
-

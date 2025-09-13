@@ -8,7 +8,7 @@ except Exception:  # pragma: no cover
 import numpy as np
 
 
-def torch_dtype_from_numpy_str(dtype_str: str):  # noqa: ANN001
+def torch_dtype_from_numpy_str(dtype_str: str) -> object | None:
     if torch is None:
         return None
     try:

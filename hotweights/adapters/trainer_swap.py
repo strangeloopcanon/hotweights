@@ -7,7 +7,8 @@ continuity across weight updates.
 from __future__ import annotations
 
 import contextlib
-from typing import Any, Dict, Iterable
+from collections.abc import Iterable
+from typing import Any
 
 import torch
 from torch.optim import Optimizer
@@ -16,7 +17,7 @@ from .optimizer_sync import sync_optimizer_state
 
 
 @contextlib.contextmanager
-def swap_barrier():
+def swap_barrier() -> Iterable[None]:
     """Ensures all ranks in a distributed group are synchronized."""
     if torch.distributed.is_initialized():
         torch.distributed.barrier()
@@ -30,23 +31,23 @@ def swap_barrier():
 def sota_in_place_swap(
     model: torch.nn.Module,
     optimizer: Optimizer,
-    staged_tensors: Dict[str, torch.Tensor],
-    plan: Dict[str, Any],
-    name_map: Dict[str, str],
-):
+    staged_tensors: dict[str, torch.Tensor],
+    plan: dict[str, Any],
+    name_map: dict[str, str],
+) -> None:
     """
     Performs a SOTA in-place swap, updating both weights and optimizer state.
 
     Args:
         model: The model to update.
         optimizer: The optimizer to synchronize.
-        staged_tensors: A dict mapping tensor keys to new tensor data, 
+        staged_tensors: A dict mapping tensor keys to new tensor data,
                         presumably from a CudaIPCAgent.
         plan: The hotweights replication plan.
         name_map: The mapping from tensor keys to model parameter names.
     """
     print("Starting SOTA in-place swap for training...")
-    
+
     # 1. Update model weights in-place
     with torch.no_grad(), swap_barrier():
         for key, target_name in name_map.items():
