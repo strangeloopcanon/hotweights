@@ -52,3 +52,26 @@ CPU Transport Fallbacks (auto-selected)
 
 - UCX: HOTWEIGHTS_UCX_CHUNK_MB, HOTWEIGHTS_UCX_CONCURRENCY, HOTWEIGHTS_UCX_INFLIGHT_LIMIT_MB, HOTWEIGHTS_UCX_RETRIES, HOTWEIGHTS_UCX_RETRY_DELAY_MS
 - MPI: --window, --mpi-chunk-mb CLI flags (optional overrides)
+
+GPU Broadcast Replication (ROCm/Intel/NVIDIA without IPC)
+
+- Broadcast Chunking
+  - HOTWEIGHTS_BCAST_CHUNK_MB (default 32): size per broadcast block.
+  - Tune larger for high-bandwidth fabrics to reduce overhead; smaller to reduce latency jitter.
+
+- Device-side Scatter Tuning
+  - HOTWEIGHTS_GPU_COPY_AUTOTUNE=1: enable heuristic tuning based on peer access (CUDA).
+  - HOTWEIGHTS_GPU_COPY_CHUNK_MB (default 16): per-copy chunk size on device tensors.
+  - HOTWEIGHTS_GPU_COPY_STREAMS (default 2 on CUDA): number of parallel CUDA streams for scatter.
+
+- Prefetch/Overlap
+  - HOTWEIGHTS_BCAST_PREFETCH=1: on root, assemble and copy the next bucket to device while broadcasting the current one.
+  - Helps overlap CPU/disk and H2D with network broadcast; disable if it contends on your platform.
+
+- Backends
+  - AMD ROCm: torch.distributed backend="nccl" uses RCCL under the hood.
+  - Intel XPU: backend="ccl" via oneccl_bindings_for_pytorch; falls back to CPU paths if unavailable.
+
+- Microbenchmark Autotune (optional)
+  - Broadcast: HOTWEIGHTS_BCAST_AUTOTUNE=1 runs a quick world broadcast microbench and sets HOTWEIGHTS_BCAST_CHUNK_MB automatically (default dataset 128 MiB; override via HOTWEIGHTS_BCAST_AUTOTUNE_MB; candidates via HOTWEIGHTS_BCAST_AUTOTUNE_CHUNKS_MB="8,16,32,64").
+  - Device copy: HOTWEIGHTS_GPU_COPY_MICRO=1 runs a local device copy microbench and sets HOTWEIGHTS_GPU_COPY_CHUNK_MB and HOTWEIGHTS_GPU_COPY_STREAMS (size via HOTWEIGHTS_GPU_COPY_AUTOTUNE_MB; candidates via HOTWEIGHTS_GPU_COPY_MICRO_CHUNKS_MB and HOTWEIGHTS_GPU_COPY_MICRO_STREAMS).

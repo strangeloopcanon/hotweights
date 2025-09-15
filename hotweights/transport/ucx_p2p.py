@@ -65,8 +65,14 @@ class UCXP2PServer:
     def start(self) -> Tuple[str, int]:
         if ucp is None:
             raise RuntimeError("ucx-py not installed")
-        port = int(os.getenv("UCX_P2P_PORT", "20000"))
+        from ..utils.env import env_int
+        from ..telemetry.logging import get_logger
+        port = env_int("UCX_P2P_PORT", 20000, minimum=1)
         self.port = port
+        try:
+            get_logger("UCXP2PServer").info(f"listen_port={port}")
+        except Exception:
+            pass
         # Launch listener in background event loop
         async def _run():
             await ucp.create_listener(self._handler, port=port)
@@ -152,10 +158,8 @@ def fetch_ranges_concurrent(tasks: List[Tuple[str, int, str, int, int]], concurr
 
     async def _run():
         # env-tunable concurrency
-        try:
-            conc = int(os.getenv("HOTWEIGHTS_P2P_CONCURRENCY", str(concurrency)))
-        except Exception:
-            conc = concurrency
+        from ..utils.env import env_int
+        conc = env_int("HOTWEIGHTS_P2P_CONCURRENCY", concurrency, minimum=1)
         sem = asyncio.Semaphore(max(1, conc))
         coros = [
             _fetch_range(addr, port, key, off, n, sem) for (addr, port, key, off, n) in tasks

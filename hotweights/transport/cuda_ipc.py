@@ -79,25 +79,17 @@ class CudaIPCTransport:
         self._handle_scope = 'node' if os.getenv("HOTWEIGHTS_HIERARCHICAL", "0") in ("1", "true", "True") else 'global'
         
         # Concurrency/window tuning
-        try:
-            self._max_inflight = max(1, int(os.getenv("HOTWEIGHTS_IPC_INFLIGHT_BUCKETS", "4")))
-        except Exception:
-            self._max_inflight = 4
-        try:
-            self._max_inflight_bytes = max(0, int(os.getenv("HOTWEIGHTS_IPC_INFLIGHT_BYTES", "0")))
-        except Exception:
-            self._max_inflight_bytes = 0
+        from ..utils.env import env_int, env_bool
+        self._max_inflight = max(1, env_int("HOTWEIGHTS_IPC_INFLIGHT_BUCKETS", 4, minimum=1))
+        self._max_inflight_bytes = max(0, env_int("HOTWEIGHTS_IPC_INFLIGHT_BYTES", 0, minimum=0))
 
         self._discover_topology()
         self._bucket_times = deque(maxlen=50)
         # Adaptive settings
-        self._adapt = os.getenv("HOTWEIGHTS_IPC_ADAPT", "1") in ("1", "true", "True")
-        try:
-            self._min_inflight = max(1, int(os.getenv("HOTWEIGHTS_IPC_MIN_INFLIGHT", "1")))
-            self._max_inflight_cap = max(self._min_inflight, int(os.getenv("HOTWEIGHTS_IPC_MAX_INFLIGHT", "16")))
-            self._target_bucket_ms = max(1, int(os.getenv("HOTWEIGHTS_IPC_TARGET_BUCKET_MS", "250")))
-        except Exception:
-            self._min_inflight, self._max_inflight_cap, self._target_bucket_ms = 1, 16, 250
+        self._adapt = env_bool("HOTWEIGHTS_IPC_ADAPT", True)
+        self._min_inflight = max(1, env_int("HOTWEIGHTS_IPC_MIN_INFLIGHT", 1, minimum=1))
+        self._max_inflight_cap = max(self._min_inflight, env_int("HOTWEIGHTS_IPC_MAX_INFLIGHT", 16, minimum=1))
+        self._target_bucket_ms = max(1, env_int("HOTWEIGHTS_IPC_TARGET_BUCKET_MS", 250, minimum=1))
         # Advertise initial window/target
         try:
             self.metrics.set_window(self._max_inflight)
@@ -109,6 +101,14 @@ class CudaIPCTransport:
             self._log = get_logger("CudaIPCTransport", {"rank": self.rank, "ws": self.world_size})
         except Exception:
             self._log = None  # type: ignore[assignment]
+        # Log selected window/targets
+        try:
+            if self._log is not None:
+                self._log.info(
+                    f"ipc.window={self._max_inflight} min={self._min_inflight} max_cap={self._max_inflight_cap} target_ms={self._target_bucket_ms}"
+                )
+        except Exception:
+            pass
 
     def _discover_topology(self):
         """Discovers the GPU topology (stubs for real nvidia-smi/NCCL calls)."""

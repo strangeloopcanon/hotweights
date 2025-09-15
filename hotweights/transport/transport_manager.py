@@ -240,8 +240,8 @@ class TransportManager:
             return False
         # If world size is 1, skip NCCL
         try:
-            from os import getenv
-            ws = int(getenv('WORLD_SIZE', '1'))
+            from ..utils.env import env_int
+            ws = env_int('WORLD_SIZE', 1, minimum=1)
         except Exception:
             ws = 1
         return ws > 1

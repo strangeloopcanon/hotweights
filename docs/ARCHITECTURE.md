@@ -3,7 +3,7 @@
 Hotweights delivers fast, versioned weight updates for LLM serving and training. It is organized into three planes:
 
 - Control plane: versioned update lifecycle, worker orchestration, late-join; implemented with ZeroMQ (simple) and a Redis‑backed HA control plane.
-- Data plane: delta compute + bucket planning (Bodo‑accelerated) and transports (CUDA‑IPC intra‑node; UCX/MPI inter‑ or intra‑node fallbacks).
+- Data plane: delta compute + bucket planning (Bodo‑accelerated) and transports (CUDA‑IPC intra‑node; GPU broadcast via NCCL/RCCL/oneCCL when IPC is unavailable; UCX/MPI inter‑ or intra‑node fallbacks).
 - Server plane: adapters for inference/training (vLLM, PyTorch) to ingest staged data and commit with minimal pause.
 
 ## Flow
@@ -26,6 +26,7 @@ Hotweights delivers fast, versioned weight updates for LLM serving and training.
     - Adaptive windowing, topology‑informed recommendations, optional GPUDirect Storage (KvikIO/CuPy), multi‑stream device scatter, handle signing + HA‑backed handle lifecycle.
   - UCX (`hotweights/transport/ucx_stream.py`): chunking, concurrency, retries/backoff + metrics, optional autotune; P2P utilities in `ucx_p2p.py`.
   - MPI (`hotweights/transport/mpi_stream.py`): streaming overlap, chunking, subgroup communicators; metrics.
+  - GPU Broadcast (`hotweights/transport/gpu_broadcast.py` + `hotweights/staging/gpu_agent.py`): vendor‑neutral device broadcast using torch.distributed backends (NCCL/RCCL/oneCCL), device‑side multi‑stream scatter with overlap and microbench autotune.
 
 - Control Plane
   - ZeroMQ server/client (`hotweights/coordinator/zmq_server.py`, `zmq_client.py`): submit plan, begin/precommit/commit, heartbeats.

@@ -48,6 +48,37 @@ pip install cupy-cuda11x kvikio
 HOTWEIGHTS_USE_GDS=1 hotweights replicate --plan plan.json --device cuda
 ```
 
+AMD ROCm / Intel XPU (GPU broadcast path):
+
+```
+# AMD ROCm (RCCL backend="nccl")
+hotweights replicate --plan plan.json --device cuda
+# Intel XPU (oneCCL backend="ccl")
+hotweights replicate --plan plan.json --device xpu
+```
+
+## Distributed Launch Recipes (torchrun)
+
+Torch’s elastic launcher exports `WORLD_SIZE`, `RANK`, and `LOCAL_RANK`, which Hotweights uses across transports.
+
+Single node (8 GPUs example):
+
+```
+torchrun --nproc-per-node=8 -m hotweights.cli replicate --plan plan.json --device cuda
+```
+
+Multi node (2 nodes × 8 GPUs):
+
+```
+export MASTER_ADDR=<rank0-host>
+export MASTER_PORT=29500
+torchrun --nnodes=2 --nproc-per-node=8 \
+  --rdzv_backend=c10d --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
+  -m hotweights.cli replicate --plan plan.json --device cuda
+```
+
+Intel XPU (oneCCL): ensure oneCCL is available in the environment (e.g., `source /opt/intel/oneapi/setvars.sh`) and use `--device xpu`. The GPU broadcast path will choose backend="ccl" automatically.
+
 ## Broadcast Demo (two ranks, CPU path)
 ```
 ./scripts/run_ucx_broadcast_demo.sh plan.json
