@@ -37,3 +37,9 @@ Distributed (torchrun)
 CI (GitHub Actions)
 - Runs `ruff`, `black --check`, and `pytest -m "not slow and not gpu and not mpi" -q` on Ubuntu for Python 3.10/3.11.
 
+Tip: To re-run CI on the PR, push an empty commit:
+
+```
+git commit --allow-empty -m "ci: re-run"
+git push
+```
