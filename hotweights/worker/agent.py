@@ -1,11 +1,10 @@
 """
-SOTA Worker Agent using the CUDA-IPC transport layer.
+SOTA Worker Agent with vendor-aware fast paths.
 
-This agent loop is greatly simplified by the new SOTA modules:
-  1) Registers with coordinator.
-  2) Fetches plan.
-  3) Replicates using the unified CudaIPCTransport.
-  4) Commits the update.
+Order of preference:
+  1) NVIDIA: CUDA-IPC transport for zero-copy.
+  2) AMD/Intel: GPU broadcast + device-side scatter.
+  3) CPU fallback: MPI/UCX/Local scatter.
 """
 from __future__ import annotations
 
@@ -15,9 +14,8 @@ from dataclasses import dataclass
 from typing import Optional
 
 from ..coordinator.zmq_client import Client, Subscriber
-from ..staging.cuda_ipc_agent import CudaIPCAgent
-from ..transport.cuda_ipc import CudaIPCTransport
 from ..telemetry.cuda_ipc_metrics import CudaIPCMetrics
+from ..utils.selection import choose_transport
 from ..telemetry.prom import start_http_server
 
 
@@ -49,21 +47,21 @@ def run_worker(cfg: WorkerConfig) -> int:
     worker_id = os.getenv("WORKER_ID", f"pid:{os.getpid()}")
     rank = int(os.getenv("RANK", "0"))
 
+    # Initialize transport based on device/vendor
     try:
-        metrics = CudaIPCMetrics(rank)
-        agent = CudaIPCAgent(device=cfg.device, metrics=metrics)
-        transport = CudaIPCTransport(agent=agent, metrics=metrics, coord_endpoint=cfg.endpoint)
-        try:
-            port = int(os.getenv("HOTWEIGHTS_METRICS_PORT", "9099"))
-            start_http_server(port)  # Start Prometheus metrics server
-        except Exception:
-            pass
+        transport, caps = choose_transport(cfg.device, cfg.endpoint)
     except Exception as e:
-        print(f"Fatal: Failed to initialize SOTA modules. Is PyTorch with CUDA installed? Error: {e}")
+        print(f"Fatal: No available transport. Error: {e}")
         return 1
 
+    try:
+        port = int(os.getenv("HOTWEIGHTS_METRICS_PORT", "9099"))
+        start_http_server(port)
+    except Exception:
+        pass
+
     # Register with coordinator
-    c.call("register", worker_id=worker_id, caps={"transport": "cuda_ipc", "rank": rank})
+    c.call("register", worker_id=worker_id, caps=caps)
     c.call("heartbeat", worker_id=worker_id)
 
     # 2. Plan Acquisition

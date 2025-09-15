@@ -20,6 +20,13 @@
       {"expr": "hotweights_ipc_scatter_seconds_sum / hotweights_ipc_scatter_seconds_count", "legendFormat": "scatter"},
       {"expr": "hotweights_ipc_bucket_seconds_sum / hotweights_ipc_bucket_seconds_count", "legendFormat": "bucket"}
     ], "id": 5},
+    {"type": "graph", "title": "GPU Broadcast Timings (avg s)", "targets": [
+      {"expr": "hotweights_bcast_seconds_sum / hotweights_bcast_seconds_count", "legendFormat": "broadcast"},
+      {"expr": "hotweights_bcast_scatter_seconds_sum / hotweights_bcast_scatter_seconds_count", "legendFormat": "scatter"}
+    ], "id": 11},
+    {"type": "graph", "title": "GPU Broadcast Bytes", "targets": [
+      {"expr": "hotweights_bcast_bytes_total", "legendFormat": "bytes"}
+    ], "id": 12},
     {"type": "graph", "title": "Binder Pause (s)", "targets": [
       {"expr": "hotweights_binder_last_pause_seconds", "legendFormat": "pause"}
     ], "id": 6},

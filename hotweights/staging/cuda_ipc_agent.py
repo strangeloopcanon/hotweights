@@ -20,6 +20,8 @@ import numpy as np
 
 from ..core.replicate import assemble_bucket_to_buffer
 from ..telemetry.cuda_ipc_metrics import CudaIPCMetrics
+from ..telemetry.logging import get_logger
+from ..utils.env import env_bool, env_int, env_mb
 
 try:
     import torch
@@ -54,42 +56,40 @@ class CudaIPCAgent:
         self._private_staging: Dict[str, torch.Tensor] = {}
         # Copy tuning
         # Heuristic defaults with optional overrides
-        try:
-            mb_env = os.getenv("HOTWEIGHTS_IPC_COPY_CHUNK_MB")
-            streams_env = os.getenv("HOTWEIGHTS_IPC_COPY_STREAMS")
-            autotune = os.getenv("HOTWEIGHTS_IPC_COPY_AUTOTUNE", "1") in ("1", "true", "True")
-            if autotune and (mb_env is None or streams_env is None):
-                # If P2P peer access is available across GPUs, assume NVLink-friendly
-                try:
-                    peer_ok = False
-                    if torch.cuda.device_count() > 1:
-                        cur = torch.cuda.current_device()
-                        other = 0 if cur != 0 else 1
-                        peer_ok = torch.cuda.can_device_access_peer(cur, other)
-                    if peer_ok:
-                        self._copy_chunk = 64 * (1 << 20)  # 64 MiB
-                        self._copy_streams_n = 4
-                    else:
-                        self._copy_chunk = 16 * (1 << 20)
-                        self._copy_streams_n = 2
-                except Exception:
+        autotune = env_bool("HOTWEIGHTS_IPC_COPY_AUTOTUNE", True)
+        mb_env = os.getenv("HOTWEIGHTS_IPC_COPY_CHUNK_MB")
+        streams_env = os.getenv("HOTWEIGHTS_IPC_COPY_STREAMS")
+        if autotune and (mb_env is None or streams_env is None):
+            # If P2P peer access is available across GPUs, assume NVLink-friendly
+            try:
+                peer_ok = False
+                if torch.cuda.device_count() > 1:
+                    cur = torch.cuda.current_device()
+                    other = 0 if cur != 0 else 1
+                    peer_ok = torch.cuda.can_device_access_peer(cur, other)
+                if peer_ok:
+                    self._copy_chunk = 64 * (1 << 20)  # 64 MiB
+                    self._copy_streams_n = 4
+                else:
                     self._copy_chunk = 16 * (1 << 20)
                     self._copy_streams_n = 2
-            else:
-                raise ValueError("skip autotune")
-        except Exception:
-            try:
-                mb = int(os.getenv("HOTWEIGHTS_IPC_COPY_CHUNK_MB", "16"))
-                self._copy_chunk = max(1, mb) * (1 << 20)
             except Exception:
                 self._copy_chunk = 16 * (1 << 20)
-            try:
-                self._copy_streams_n = max(1, int(os.getenv("HOTWEIGHTS_IPC_COPY_STREAMS", "2")))
-            except Exception:
                 self._copy_streams_n = 2
+        else:
+            self._copy_chunk = env_mb("HOTWEIGHTS_IPC_COPY_CHUNK_MB", 16)
+            self._copy_streams_n = max(1, env_int("HOTWEIGHTS_IPC_COPY_STREAMS", 2))
         self._copy_streams = [torch.cuda.Stream() for _ in range(self._copy_streams_n)]
         # Pinned host buffer pool (simple size->tensor cache)
         self._pinned_pool: dict[int, torch.Tensor] = {}
+        # Log chosen copy parameters
+        try:
+            self._log = get_logger("CudaIPCAgent", {"device": str(self.device)})
+            self._log.info(
+                f"ipc.copy_chunk={int(self._copy_chunk/(1<<20))}MiB streams={self._copy_streams_n}"
+            )
+        except Exception:
+            pass
 
     def _get_pinned(self, size: int) -> "torch.Tensor":  # type: ignore[name-defined]
         # Return a pinned host tensor with capacity >= size; simple exact-size cache for now

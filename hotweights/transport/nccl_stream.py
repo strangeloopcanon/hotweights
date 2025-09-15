@@ -19,27 +19,15 @@ except Exception:  # pragma: no cover - optional dependency
     dist = None  # type: ignore
 
 from .base import Transport
+from ..utils.dist import ensure_pg, get_subgroup
 
 
 Bucket = Tuple[int, np.ndarray]
 
 
 def _maybe_init_dist() -> bool:
-    if torch is None or dist is None:
-        return False
-    if not torch.cuda.is_available():
-        return False
-    try:
-        if dist.is_available():
-            if not dist.is_initialized():
-                # Attempt environment initialization
-                backend = "nccl"
-                init_method = None  # use env MASTER_ADDR/PORT
-                dist.init_process_group(backend=backend, init_method=init_method)
-            return True
-    except Exception:
-        return False
-    return False
+    ok, used = ensure_pg("nccl")
+    return bool(ok)
 
 
 @dataclass
@@ -83,12 +71,8 @@ class NCCLReplicator(Transport):
         def get_group(consumers: Optional[List[int]]):
             if not consumers:
                 return dist.group.WORLD  # type: ignore[attr-defined]
-            key = frozenset(int(x) for x in consumers)
-            g = group_cache.get(key)
-            if g is None:
-                g = dist.new_group(ranks=sorted(key))
-                group_cache[key] = g
-            return g
+            g = get_subgroup(consumers, group_cache)
+            return g if g is not None else dist.group.WORLD  # type: ignore[attr-defined]
 
         for item in bucket_iter:
             if len(item) == 3:
@@ -151,4 +135,3 @@ class NCCLReplicator(Transport):
             # Copy back to CPU numpy
             out_view = torch.from_numpy(out)
             out_view.view(torch.uint8).copy_(dst, non_blocking=False)
-

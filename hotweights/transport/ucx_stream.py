@@ -25,6 +25,7 @@ except Exception:  # pragma: no cover
 from ..telemetry.prom import Counter, Gauge
 from .base import Transport
 from ..telemetry.logging import get_logger
+from ..utils.env import env_int
 
 
 Bucket = Tuple[int, np.ndarray]
@@ -52,17 +53,11 @@ class UCXReplicator(Transport):
         except Exception:
             pass
         # env-tunable chunk size
-        try:
-            mb = int(os.getenv("HOTWEIGHTS_UCX_CHUNK_MB", str(self.chunk_bytes >> 20)))
-            self.chunk_bytes = max(1, mb) << 20
-        except Exception:
-            pass
+        mb = env_int("HOTWEIGHTS_UCX_CHUNK_MB", (self.chunk_bytes >> 20), minimum=1)
+        self.chunk_bytes = max(1, mb) << 20
         # env-tunable send concurrency per chunk
-        try:
-            conc = int(os.getenv("HOTWEIGHTS_UCX_CONCURRENCY", "0"))
-            self.send_concurrency = max(0, conc)
-        except Exception:
-            self.send_concurrency = 0
+        conc = env_int("HOTWEIGHTS_UCX_CONCURRENCY", 0, minimum=0)
+        self.send_concurrency = max(0, conc)
         # Autotune basic concurrency if not set
         if self.send_concurrency == 0:
             try:
@@ -74,24 +69,15 @@ class UCXReplicator(Transport):
             except Exception:
                 pass
         # inflight limit (MB) maps to max peers per chunk based on chunk size
-        try:
-            inflight_mb = int(os.getenv("HOTWEIGHTS_UCX_INFLIGHT_LIMIT_MB", "0"))
-        except Exception:
-            inflight_mb = 0
+        inflight_mb = env_int("HOTWEIGHTS_UCX_INFLIGHT_LIMIT_MB", 0, minimum=0)
         if inflight_mb > 0:
             limit_bytes = max(1, inflight_mb) << 20
             max_peers = max(1, limit_bytes // self.chunk_bytes)
             if self.send_concurrency == 0 or self.send_concurrency > max_peers:
                 self.send_concurrency = int(max_peers)
         # retries
-        try:
-            self.send_retries = max(0, int(os.getenv("HOTWEIGHTS_UCX_RETRIES", "0")))
-        except Exception:
-            self.send_retries = 0
-        try:
-            self.retry_delay_ms = max(0, int(os.getenv("HOTWEIGHTS_UCX_RETRY_DELAY_MS", "10")))
-        except Exception:
-            self.retry_delay_ms = 10
+        self.send_retries = max(0, env_int("HOTWEIGHTS_UCX_RETRIES", 0, minimum=0))
+        self.retry_delay_ms = max(0, env_int("HOTWEIGHTS_UCX_RETRY_DELAY_MS", 10, minimum=0))
         # Simple autotune: adjust chunk size for larger worlds if requested
         try:
             if os.getenv("HOTWEIGHTS_UCX_AUTOTUNE", "0") in ("1", "true", "True"):

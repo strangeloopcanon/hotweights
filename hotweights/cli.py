@@ -181,33 +181,17 @@ def _cmd_replicate(args: argparse.Namespace) -> int:
     except Exception:
         pass
 
-    # Try CUDA-IPC path, fallback to MPI/UCX if CUDA unavailable
-    use_cuda = False
+    # Try GPU paths in order: CUDA-IPC (NVIDIA), GPU broadcast (ROCm/Intel), fallback CPU
+    device_s = str(getattr(args, "device", "cuda"))
     try:
-        import torch  # type: ignore
+        from .utils.selection import choose_transport
+        transport, caps = choose_transport(device_s, coord_ep)
+    except Exception as e:
+        transport, caps = None, {"transport": "unknown"}
 
-        use_cuda = torch.cuda.is_available() and args.device.startswith("cuda")
-    except Exception:
-        use_cuda = False
-
-    if use_cuda:
-        from .staging.cuda_ipc_agent import CudaIPCAgent
-        from .transport.cuda_ipc import CudaIPCTransport
-        from .telemetry.cuda_ipc_metrics import CudaIPCMetrics
-
-        rank = int(os.getenv("RANK", "0"))
-        metrics = CudaIPCMetrics(rank)
-        agent = CudaIPCAgent(device=args.device, metrics=metrics)
-        transport = CudaIPCTransport(agent=agent, metrics=metrics, coord_endpoint=coord_ep)
-        print("Using SOTA CUDA-IPC Transport Layer.")
-        with Timer("total") as total_timer:
-            transport.replicate(plan)
-        print(f"Replicated {len(plan.get('buckets', []))} buckets, total {total_bytes} bytes in {total_timer.elapsed:.3f}s.")
-        if args.commit:
-            print("Commit hint: Use apply_from_ipc_agent_to_module(agent, items, module, name_map) in your worker for GPU-native commit.")
-    else:
+    if transport is None or caps.get("transport") == "cpu_fallback":
         # Fallback to auto-selected CPU transport (MPI/UCX) or local
-        print("CUDA not available; selecting CPU transport (auto).")
+        print("Selecting CPU transport (auto).")
         from .staging.host_agent import HostAgent
         from .transport.transport_manager import TransportManager
 
@@ -292,6 +276,19 @@ def _cmd_replicate(args: argparse.Namespace) -> int:
                 replicator.replicate(gen())
                 while bucket_bufs:
                     on_complete(0, bucket_bufs[0][1])
+    else:
+        # GPU fast paths
+        if caps.get("transport") == "cuda_ipc":
+            print("Using SOTA CUDA-IPC Transport Layer.")
+            commit_hint = "Commit hint: Use apply_from_ipc_agent_to_module(agent, items, module, name_map) in your worker for GPU-native commit."
+        else:
+            print("Using GPU broadcast transport.")
+            commit_hint = None
+        with Timer("total") as total_timer:
+            transport.replicate(plan)
+        print(f"Replicated {len(plan.get('buckets', []))} buckets, total {total_bytes} bytes in {total_timer.elapsed:.3f}s.")
+        if args.commit and commit_hint:
+            print(commit_hint)
 
     # Submit/begin/commit outline
     if coord_ep:

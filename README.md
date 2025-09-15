@@ -1,6 +1,6 @@
 # hotweights
 
-Fast, versioned weight updates for LLM serving and training.
+Fast, vendor‑aware weight updates for LLM serving and training.
 
 This repository provides a control/plan/transport stack to hot‑swap large model
 weights across a GPU cluster with minimal pause time. See `docs/ARCHITECTURE.md`
@@ -8,7 +8,16 @@ for a high‑level overview.
 
 ## Core Use Cases & Limitations
 
-`hotweights` is designed for performance-critical scenarios. Here's where it excels and what its current limitations are.
+`hotweights` is designed for performance‑critical scenarios across NVIDIA, AMD, and Intel GPUs with automatic fast‑path selection. Here's where it excels and what its current limitations are.
+
+### GPU Support Matrix
+
+- NVIDIA: CUDA‑IPC zero‑copy within a node; optional GDS; hierarchical broadcast.
+- AMD ROCm: GPU device broadcast via RCCL (backend="nccl") + device‑side scatter.
+- Intel XPU: GPU device broadcast via oneCCL (backend="ccl") + device‑side scatter.
+- CPU‑only: MPI/UCX/local fallback with pinned‑host buffers.
+
+See `docs/VENDOR_SETUP.md` for ROCm and Intel oneCCL setup details.
 
 ### What It's Great For
 
@@ -53,14 +62,24 @@ hotweights verify-plan --plan plan.json --require-consumers || true
 # If you use TP groups:
 # hotweights verify-tp --tp-groups groups.json --world-size 2 || true
 
-# Replicate locally and verify; optionally commit into offline adapter
+# Replicate and verify; fastest path auto‑selected per device
+# NVIDIA (CUDA‑IPC):
+hotweights replicate --plan plan.json --device cuda --verify
+# AMD ROCm (broadcast + device scatter):
+hotweights replicate --plan plan.json --device cuda --verify
+# Intel XPU (oneCCL broadcast + device scatter):
+hotweights replicate --plan plan.json --device xpu --verify
+# Optional: commit into offline adapter
 hotweights replicate --plan plan.json --verify --commit
+
+# GPU broadcast smoke test (ROCm/Intel/NVIDIA w/o IPC)
+python examples/gpu_broadcast_smoke.py --plan plan.json --device cuda
 
 # Optional: run a coordinator and workers (ZeroMQ)
 hotweights coord-serve --endpoint tcp://127.0.0.1:5555 &
 HOTWEIGHTS_COORD=tcp://127.0.0.1:5555 mpirun -n 2 hotweights worker --pinned --no-verify
 
-# CPU transport selection is automatic (MPI > UCX > local). Example without CUDA:
+# CPU transport selection is automatic (MPI > UCX > local). Example without GPUs:
 export WORLD_SIZE=2 MASTER_ADDR=127.0.0.1 MASTER_PORT=19999
 # Terminal 1 (rank 0):
 RANK=0 hotweights replicate --plan plan.json --verify --coord-endpoint tcp://127.0.0.1:5555 --manifest-next ./m_next.json
@@ -68,6 +87,22 @@ RANK=0 hotweights replicate --plan plan.json --verify --coord-endpoint tcp://127
 RANK=1 hotweights replicate --plan plan.json --verify --coord-endpoint tcp://127.0.0.1:5555
 
 # After commit, the next manifest is recorded as current (for prev-less planning next time).
+
+### AMD ROCm and Intel XPU (GPU Broadcast)
+
+- Broadcast device buffers using torch.distributed (RCCL/oneCCL) and scatter on device.
+- Auto‑selected when CUDA‑IPC is unavailable or when `--device xpu` is used.
+- Tunables for device scatter:
+  - `HOTWEIGHTS_GPU_COPY_CHUNK_MB` (default 16) — device copy chunk size.
+  - `HOTWEIGHTS_GPU_COPY_STREAMS` (default 2 on CUDA) — parallel streams for scatter.
+  - `HOTWEIGHTS_GPU_COPY_MICRO=1` — run a quick local microbench to auto‑pick chunk/streams (see docs/TUNING.md).
+- Tunables for broadcast:
+  - `HOTWEIGHTS_BCAST_CHUNK_MB` (default 32) — broadcast chunk size.
+  - `HOTWEIGHTS_BCAST_AUTOTUNE=1` — run a quick world broadcast microbench to auto‑pick chunk size (see docs/TUNING.md).
+- Requirements:
+  - AMD: PyTorch ROCm build; RCCL provided via backend="nccl".
+  - Intel: PyTorch with IPEX + `oneccl_bindings_for_pytorch`; backend="ccl".
+  - Ensure `torchrun` or env (`WORLD_SIZE`, `RANK`, `MASTER_ADDR`, `MASTER_PORT`).
 ```
 
 ## Tests
@@ -133,6 +168,12 @@ Hotweights exposes Prometheus metrics for core components. If `prometheus_client
   - `hotweights_ipc_bandwidth_gbps` (gauge)
   - `hotweights_ipc_bucket_seconds` (histogram)
 
+- GPU Broadcast transport metrics:
+  - `hotweights_bcast_buckets_total` (counter)
+  - `hotweights_bcast_bytes_total` (counter)
+  - `hotweights_bcast_seconds` (histogram)
+  - `hotweights_bcast_scatter_seconds` (histogram)
+
 - HA control plane metrics:
   - `hotweights_handles_posted_total`, `hotweights_handles_fetched_total`, `hotweights_handles_acked_total`, `hotweights_handles_expired_total`
   - `hotweights_handles_active` (gauge)
@@ -197,6 +238,7 @@ Hotweights uses Bodo to accelerate planning on CPU; Bodo does not allocate GPU m
   - Replicate: confirm multiple buckets in flight; stable bucket seconds; recommended window reasonable.
   - Hierarchical: set `HOTWEIGHTS_HIERARCHICAL=1`; ensure `torchrun` provides `WORLD_SIZE/RANK/LOCAL_RANK`.
   - Security: set `HOTWEIGHTS_COORD_TOKEN` in clients when using a shared coordinator.
+  - See `docs/VALIDATION.md` for a step-by-step validation guide (CPU, CUDA‑IPC, ROCm/oneCCL broadcast, torchrun).
 
 - Key knobs
   - CUDA‑IPC: `HOTWEIGHTS_IPC_INFLIGHT_BUCKETS`, `HOTWEIGHTS_IPC_ADAPT=1`, `HOTWEIGHTS_IPC_COPY_CHUNK_MB`, `HOTWEIGHTS_IPC_COPY_STREAMS`.
