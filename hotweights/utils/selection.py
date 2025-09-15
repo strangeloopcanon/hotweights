@@ -68,14 +68,24 @@ def choose_transport(device: str, coord_endpoint: str | None = None) -> tuple[An
 
     # CPU fallback via TransportManager shim
     from ..staging.host_agent import HostAgent
-    from ..transport.transport_manager import TransportManager
     import numpy as _np
     from ..core.replicate import assemble_bucket as _assemble_bucket
     from ..core.replicate import scatter_bucket as _scatter_bucket
 
     host = HostAgent(use_pinned=False)
-    tm = TransportManager(world_size=int(os.getenv("WORLD_SIZE", "1")), rank=int(os.getenv("RANK", "0")), auto_select=True)
-    replicator = tm.get_replicator()
+
+    # Try to use TransportManager if available; otherwise fall back to local path
+    replicator = None
+    try:
+        from ..transport.transport_manager import TransportManager
+
+        tm = TransportManager(world_size=int(os.getenv("WORLD_SIZE", "1")), rank=int(os.getenv("RANK", "0")), auto_select=True)
+        try:
+            replicator = tm.get_replicator()
+        except Exception:
+            replicator = None
+    except Exception:
+        replicator = None
 
     class _Shim:
         def __init__(self, rep, host_agent):
@@ -83,6 +93,13 @@ def choose_transport(device: str, coord_endpoint: str | None = None) -> tuple[An
             self._h = host_agent
 
         def replicate(self, plan):  # noqa: ANN001
+            if self._r is None:
+                # Pure local path: assemble and scatter bucket-by-bucket
+                for b in plan.get("buckets", []):
+                    items = b["items"]
+                    buf = _assemble_bucket(items)
+                    _scatter_bucket(self._h, items, buf)
+                return
             rank_local = getattr(self._r, "world_rank", getattr(self._r, "rank", 0))
             bucket_bufs: list[tuple[dict, _np.ndarray]] = []
 
