@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 import os
+import time
 
 import numpy as np
 
@@ -80,25 +81,47 @@ class CudaIPCAgent:
             self._copy_chunk = env_mb("HOTWEIGHTS_IPC_COPY_CHUNK_MB", 16)
             self._copy_streams_n = max(1, env_int("HOTWEIGHTS_IPC_COPY_STREAMS", 2))
         self._copy_streams = [torch.cuda.Stream() for _ in range(self._copy_streams_n)]
-        # Pinned host buffer pool (simple size->tensor cache)
+        # Pinned host buffer pool (size-class reuse)
         self._pinned_pool: dict[int, torch.Tensor] = {}
+        self._pinned_granularity = max(1 << 20, env_mb("HOTWEIGHTS_IPC_PINNED_GRANULARITY_MB", 8))
+        # GDS capability and logging guards
+        self._gds_capable = (_cp is not None) and (_kvikio is not None)
+        self._gds_info_logged = False
+        self._gds_error_logged = False
         # Log chosen copy parameters
+        self._log = None
         try:
             self._log = get_logger("CudaIPCAgent", {"device": str(self.device)})
             self._log.info(
                 f"ipc.copy_chunk={int(self._copy_chunk/(1<<20))}MiB streams={self._copy_streams_n}"
             )
         except Exception:
-            pass
+            self._log = None
+
+    def _round_pinned_size(self, size: int) -> int:
+        gran = self._pinned_granularity
+        if size <= gran:
+            return gran
+        return ((size + gran - 1) // gran) * gran
 
     def _get_pinned(self, size: int) -> "torch.Tensor":  # type: ignore[name-defined]
-        # Return a pinned host tensor with capacity >= size; simple exact-size cache for now
-        for cap, t in list(self._pinned_pool.items()):
-            if cap >= size:
-                return t
-        t = torch.empty(size, dtype=torch.uint8, pin_memory=True)
-        self._pinned_pool[size] = t
-        return t
+        wanted = self._round_pinned_size(size)
+        for cap in sorted(self._pinned_pool.keys()):
+            buf = self._pinned_pool[cap]
+            if cap >= wanted:
+                return buf
+        buf = torch.empty(wanted, dtype=torch.uint8, pin_memory=True)
+        self._pinned_pool[wanted] = buf
+        return buf
+
+    def _should_use_gds(self) -> bool:
+        if not self._gds_capable:
+            return False
+        if os.getenv("HOTWEIGHTS_USE_GDS") is not None:
+            return env_bool("HOTWEIGHTS_USE_GDS", True)
+        if env_bool("HOTWEIGHTS_DISABLE_GDS", False):
+            return False
+        return True
 
     def assemble_and_share(self, bucket: Dict[str, Any]) -> Any:
         """(Root Node Only) Assembles a bucket into a new GPU buffer and returns its IPC handle."""
@@ -109,9 +132,15 @@ class CudaIPCAgent:
         t1 = torch.cuda.Event(enable_timing=True)
         t0.record()
         # Try GPUDirect Storage path when available and enabled
-        use_gds = (os.getenv("HOTWEIGHTS_USE_GDS", "0") in ("1", "true", "True")) and (_cp is not None) and (_kvikio is not None)
+        use_gds = self._should_use_gds()
+        gds_start = time.perf_counter() if use_gds else None
+        if use_gds and self._metrics is not None:
+            self._metrics.set_gds_enabled(True)
         if use_gds:
             try:
+                if not self._gds_info_logged and self._log is not None:
+                    self._log.info("Using GPUDirect Storage (CuFile) for bucket assembly")
+                    self._gds_info_logged = True
                 # Create a CuPy view over the torch tensor
                 cp_view = _cp.fromDlpack(torch.utils.dlpack.to_dlpack(gpu_buffer))
                 for it in bucket["items"]:
@@ -124,10 +153,22 @@ class CudaIPCAgent:
                     with _kvikio.CuFile(path, "r") as f:
                         f.pread(arr_view)  # read entire file into device slice
                 torch.cuda.synchronize()
-            except Exception:
+                if self._metrics is not None and gds_start is not None:
+                    self._metrics.observe_gds_seconds(time.perf_counter() - gds_start)
+            except Exception as exc:
                 # Fallback to CPU assemble
                 use_gds = False
+                if self._metrics is not None:
+                    self._metrics.set_gds_enabled(False)
+                if self._log is not None and not self._gds_error_logged:
+                    self._log.warning(
+                        "GDS assembly failed, falling back to pinned host buffers: %s",
+                        exc,
+                    )
+                    self._gds_error_logged = True
         if not use_gds:
+            if self._metrics is not None and gds_start is None:
+                self._metrics.set_gds_enabled(False)
             # Assemble via pinned host tensor then async H2D copy
             pinned = self._get_pinned(size)
             # Fill pinned buffer directly from files
@@ -142,7 +183,8 @@ class CudaIPCAgent:
                 src_t = torch.from_numpy(mm[:n])
                 dst.copy_(src_t)
             # Async H2D copy
-            gpu_buffer.copy_(pinned.to(self.device, non_blocking=True))
+            host_view = pinned[:size]
+            gpu_buffer.copy_(host_view, non_blocking=True)
             torch.cuda.synchronize()
         t1.record(); t1.synchronize()
         # Metrics: observe assemble seconds

@@ -17,10 +17,13 @@ CUDA-IPC Replication
   - HOTWEIGHTS_IPC_COPY_AUTOTUNE=1 enables heuristics based on peer access
   - HOTWEIGHTS_IPC_COPY_CHUNK_MB (default 16) and HOTWEIGHTS_IPC_COPY_STREAMS (default 2)
   - Larger chunks and more streams often help on NVLink nodes; smaller on PCIe.
+  - HOTWEIGHTS_IPC_PINNED_GRANULARITY_MB (default 8) tunes host pinned buffer size classes to reduce reallocations.
 
-- GPUDirect Storage (optional)
-  - HOTWEIGHTS_USE_GDS=1 with CuPy + KvikIO installed
-  - Falls back to CPU assemble + H2D copy if unavailable
+- GPUDirect Storage
+  - Enabled by default when CuPy + KvikIO are available; disable via HOTWEIGHTS_DISABLE_GDS=1
+  - HOTWEIGHTS_USE_GDS still overrides explicitly (0|1)
+  - Metrics: hotweights_ipc_gds_enabled gauge, hotweights_ipc_gds_seconds histogram
+  - Falls back to CPU assemble + H2D copy automatically when unavailable or on failure
 
 Topology Metrics
 

@@ -150,17 +150,21 @@ class GpuBroadcastTransport:
         for i, b in enumerate(buckets):
             bucket_id = int(b["bucket_id"])
             size = int(b.get("size", 0))
-            consumers = b.get("consumer_ranks")
-            # If consumers set and this rank is not a consumer, skip
-            if consumers is not None and self.rank not in [int(x) for x in consumers]:
+            consumers_raw = b.get("consumer_ranks")
+            consumers = [int(x) for x in consumers_raw] if consumers_raw is not None else None
+            group = get_subgroup(consumers, self._groups) if consumers else None
+            force_world = False
+            if consumers and group is None:
+                # Fallback: without a subgroup everyone must participate on WORLD.
+                force_world = True
+                try:
+                    group = getattr(dist.group, "WORLD", None) if dist is not None else None  # type: ignore[attr-defined]
+                except Exception:
+                    group = None
+            if consumers and not force_world and self.rank not in consumers:
                 continue
-            group = get_subgroup(consumers, self._groups)
             world_root = min(consumers) if consumers else 0
-            # src index: world rank for WORLD, else index within group
-            if group is None:
-                src_rank = world_root
-            else:
-                src_rank = sorted(int(x) for x in (consumers or [0])).index(world_root)
+            src_rank = world_root
             # Build device tensor
             is_root = (self.rank == world_root)
             if is_root and next_thread is not None:
@@ -190,25 +194,28 @@ class GpuBroadcastTransport:
                 else:
                     dist.broadcast(dev, src=src_rank, group=group)
             t_b1 = time.perf_counter()
-            # Share and scatter locally
-            self.agent.share_from_gpu(bucket_id, dev)
-            t_s0 = time.perf_counter()
-            self.agent.scatter_from_shared(bucket_id, b["items"])
-            t_s1 = time.perf_counter()
-            # Metrics
-            try:
-                self._buckets_c.inc(1.0)
-                self._bytes_c.inc(float(size))
-                self._bcast_h.observe(max(0.0, t_b1 - t_b0))
-                self._scatter_h.observe(max(0.0, t_s1 - t_s0))
-            except Exception:
-                pass
+            # Share and scatter locally only for real consumers
+            should_stage = consumers is None or self.rank in consumers
+            if should_stage:
+                self.agent.share_from_gpu(bucket_id, dev)
+                t_s0 = time.perf_counter()
+                self.agent.scatter_from_shared(bucket_id, b["items"])
+                t_s1 = time.perf_counter()
+                # Metrics
+                try:
+                    self._buckets_c.inc(1.0)
+                    self._bytes_c.inc(float(size))
+                    self._bcast_h.observe(max(0.0, t_b1 - t_b0))
+                    self._scatter_h.observe(max(0.0, t_s1 - t_s0))
+                except Exception:
+                    pass
             # Kick off prefetch for next bucket on root
             if is_root and prefetch_ok and (i + 1) < len(buckets):
                 b_next = buckets[i + 1]
                 # If next bucket doesn't include this rank, skip prefetch
-                cons_next = b_next.get("consumer_ranks")
-                if cons_next is None or self.rank in [int(x) for x in cons_next]:
+                cons_next_raw = b_next.get("consumer_ranks")
+                cons_next = [int(x) for x in cons_next_raw] if cons_next_raw is not None else None
+                if cons_next is None or self.rank in cons_next:
                     def _do_prefetch():  # noqa: ANN202
                         try:
                             next_ready["dev"] = self._prepare_dev_on_root(b_next)

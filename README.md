@@ -13,9 +13,11 @@ for a high‑level overview.
 ### GPU Support Matrix
 
 - NVIDIA: CUDA‑IPC zero‑copy within a node; optional GDS; hierarchical broadcast.
-- AMD ROCm: GPU device broadcast via RCCL (backend="nccl") + device‑side scatter.
-- Intel XPU: GPU device broadcast via oneCCL (backend="ccl") + device‑side scatter.
-- CPU‑only: MPI/UCX/local fallback with pinned‑host buffers.
+- AMD ROCm: GPU device broadcast via RCCL (backend="nccl") + device-side scatter.
+- Intel XPU: GPU device broadcast via oneCCL (backend="ccl") + device-side scatter.
+- CPU‑only: MPI/UCX/local fallback with pinned-host buffers.
+
+> When you first land on CUDA hosts with CuPy + KvikIO installed, GDS (CuFile) staging is automatically enabled. Do a quick `pytest -k cuda_ipc` run or check the `hotweights_ipc_gds_enabled` metric after one replication to confirm the GPUDirect path is active; if the hardware is not ready yet, leave the default in place—no extra switches are required.
 
 See `docs/VENDOR_SETUP.md` for ROCm and Intel oneCCL setup details.
 

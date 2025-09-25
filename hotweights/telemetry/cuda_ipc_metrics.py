@@ -56,6 +56,14 @@ class CudaIPCMetrics:
             "hotweights_ipc_scatter_seconds",
             "Time to scatter per-item slices into private buffers"
         )
+        self.ipc_gds_seconds = Histogram(
+            "hotweights_ipc_gds_seconds",
+            "Time spent performing bucket I/O via GPUDirect Storage"
+        )
+        self.gds_enabled = Gauge(
+            "hotweights_ipc_gds_enabled",
+            "Indicator for GDS path usage"
+        )
         
         # Advanced congestion and topology metrics
         self.congestion_window = Gauge(
@@ -143,6 +151,18 @@ class CudaIPCMetrics:
     def observe_scatter_seconds(self, seconds: float) -> None:
         try:
             self.ipc_scatter_seconds.observe(seconds)
+        except Exception:
+            pass
+
+    def observe_gds_seconds(self, seconds: float) -> None:
+        try:
+            self.ipc_gds_seconds.observe(seconds)
+        except Exception:
+            pass
+
+    def set_gds_enabled(self, enabled: bool) -> None:
+        try:
+            self.gds_enabled.set(1.0 if enabled else 0.0)
         except Exception:
             pass
 
