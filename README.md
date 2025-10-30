@@ -81,6 +81,15 @@ python examples/gpu_broadcast_smoke.py --plan plan.json --device cuda
 hotweights coord-serve --endpoint tcp://127.0.0.1:5555 &
 HOTWEIGHTS_COORD=tcp://127.0.0.1:5555 mpirun -n 2 hotweights worker --pinned --no-verify
 
+# Experimental: run the FastAPI control plane + planner
+pip install -e .[api]
+uvicorn hotweights.coordinator.fastapi_app:build_app --factory \
+  --host 0.0.0.0 --port 8000
+# Sample endpoints:
+#   GET  /health
+#   POST /coordinator/register {"worker_id": "...", "caps": {...}}
+#   POST /plan {"prev": {...}, "next": {...}, "bucket_mb": 64}
+
 # CPU transport selection is automatic (MPI > UCX > local). Example without GPUs:
 export WORLD_SIZE=2 MASTER_ADDR=127.0.0.1 MASTER_PORT=19999
 # Terminal 1 (rank 0):

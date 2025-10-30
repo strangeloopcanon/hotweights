@@ -4,7 +4,12 @@ Define stable TypedDicts for interchange between components.
 """
 from __future__ import annotations
 
-from typing import List, Dict, Optional, TypedDict, Literal
+from typing import Dict, List, Optional, Literal
+
+try:  # pragma: no cover - import shim for pydantic compatibility
+    from typing_extensions import TypedDict
+except ImportError:  # pragma: no cover - fallback for Python >=3.12
+    from typing import TypedDict  # type: ignore[misc, assignment]
 
 
 # Versioning for plan schema produced by create_plan
@@ -59,4 +64,3 @@ class Plan(TypedDict, total=False):
     total_bytes: int
     buckets: List[PlanBucket]
     verification: Dict[str, object]
-
