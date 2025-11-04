@@ -1,5 +1,6 @@
 # hotweights
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/strangeloopcanon/hotweights)
+
 Fast, versioned weight updates for LLM serving and training.
 
 This repository provides a control/plan/transport stack to hot‑swap large model
