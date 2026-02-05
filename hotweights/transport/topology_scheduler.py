@@ -300,7 +300,7 @@ class TopologyAwareScheduler:
     def compute_transfer_schedule(self, bucket_id: int, src_rank: int, 
                                  dst_ranks: List[int], size_bytes: int) -> TransferSchedule:
         """Compute optimal transfer schedule for a bucket."""
-        with Timer() as timer:
+        with Timer("topology_schedule") as timer:
             # Get source GPU topology
             src_gpu = self.topology.gpus.get(src_rank)
             if not src_gpu:

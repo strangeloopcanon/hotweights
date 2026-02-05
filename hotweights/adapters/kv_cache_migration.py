@@ -258,12 +258,17 @@ def migrate_kv_cache(  # noqa: C901
             print(f"KV migration: ignoring invalid head_map ({reason})")
             head_map = None
             head_map_source = None
+    target_device = torch.device("cpu")
+    try:
+        target_device = next(model_new.parameters()).device
+    except Exception:
+        target_device = torch.device("cpu")
     applied_layers = 0
     for k_old, v_old in kv_cache_old:
         # In a real scenario, we would create new tensors and apply transformations.
         # Here, we just clone them to simulate the process.
-        k_new = k_old.clone().to(model_new.device)
-        v_new = v_old.clone().to(model_new.device)
+        k_new = k_old.clone().to(target_device)
+        v_new = v_old.clone().to(target_device)
         if allow_transforms:
             k_new, v_new = _maybe_adjust_rope((k_new, v_new), model_new)
             if head_map is not None:
@@ -277,7 +282,8 @@ def migrate_kv_cache(  # noqa: C901
         kv_cache_new.append((k_new, v_new))
         migrated_layers += 1
 
-    torch.cuda.synchronize()
+    if target_device.type == "cuda" and torch.cuda.is_available():
+        torch.cuda.synchronize()
 
     report = {
         "migrated_layers": migrated_layers,

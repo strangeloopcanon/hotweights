@@ -30,17 +30,18 @@ class GDSDirectTransfer:
         self.device_id = device_id
         self._initialized = False
         self._gds_context = None
+        self._gds_available = GDS_AVAILABLE
         
-        if GDS_AVAILABLE:
+        if self._gds_available:
             try:
                 self._initialize_gds()
             except Exception as e:
                 logger.warning(f"Failed to initialize GDS: {e}")
-                GDS_AVAILABLE = False
+                self._gds_available = False
     
     def _initialize_gds(self):
         """Initialize GPUDirect Storage context."""
-        if not GDS_AVAILABLE:
+        if not self._gds_available:
             return
             
         # Set CUDA device
@@ -125,7 +126,7 @@ class GDSDirectTransfer:
     @property
     def is_available(self) -> bool:
         """Check if GPUDirect Storage is available and initialized."""
-        return self._initialized and GDS_AVAILABLE
+        return self._initialized and self._gds_available
 
 
 class GDSFallbackTransfer:
@@ -169,7 +170,7 @@ class GDSFallbackTransfer:
         stream.synchronize()
 
 
-def create_gds_transfer(device_id: int = 0) -> GDSDirectTransfer:
+def create_gds_transfer(device_id: int = 0) -> GDSDirectTransfer | GDSFallbackTransfer:
     """Factory function to create appropriate transfer mechanism."""
     if GDS_AVAILABLE:
         try:

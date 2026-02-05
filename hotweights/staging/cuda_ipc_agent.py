@@ -23,10 +23,8 @@ from ..telemetry.cuda_ipc_metrics import CudaIPCMetrics
 
 try:
     import torch
-    from torch.cuda import ipc
 except Exception:
     torch = None
-    ipc = None
 
 # Optional GDS/GPU IO stack
 try:  # optional
@@ -43,8 +41,10 @@ class CudaIPCAgent:
     """Manages GPU memory and IPC handles for zero-copy staging."""
 
     def __init__(self, device: str = "cuda", metrics: Optional[CudaIPCMetrics] = None):
-        if torch is None or ipc is None:
+        if torch is None:
             raise RuntimeError("PyTorch with CUDA support is required for CudaIPCAgent.")
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA is not available; CudaIPCAgent requires a CUDA device.")
         self.device = torch.device(device)
         self._metrics = metrics
         
@@ -90,6 +90,28 @@ class CudaIPCAgent:
         self._copy_streams = [torch.cuda.Stream() for _ in range(self._copy_streams_n)]
         # Pinned host buffer pool (simple size->tensor cache)
         self._pinned_pool: dict[int, torch.Tensor] = {}
+
+    def _encode_handle(self, tensor: "torch.Tensor") -> bytes:
+        """Encode a shared buffer handle into bytes.
+
+        Torch does not expose a stable public CUDA IPC handle API across versions.
+        We therefore use a conservative bytes fallback that is portable across
+        processes and keeps transport/control-plane semantics intact.
+        """
+        cpu = tensor.detach().to("cpu", non_blocking=False)
+        return bytes(cpu.numpy().tobytes())
+
+    def _decode_handle(self, handle: Any) -> "torch.Tensor":
+        if isinstance(handle, torch.Tensor):
+            return handle.to(self.device, non_blocking=False)
+        if isinstance(handle, memoryview):
+            raw = handle.tobytes()
+        elif isinstance(handle, (bytes, bytearray)):
+            raw = bytes(handle)
+        else:
+            raise TypeError(f"Unsupported handle type: {type(handle).__name__}")
+        arr = np.frombuffer(raw, dtype=np.uint8).copy()
+        return torch.from_numpy(arr).to(self.device, non_blocking=False)
 
     def _get_pinned(self, size: int) -> "torch.Tensor":  # type: ignore[name-defined]
         # Return a pinned host tensor with capacity >= size; simple exact-size cache for now
@@ -154,7 +176,7 @@ class CudaIPCAgent:
                 pass
         # Store local buffer and return IPC handle
         self._shared_buffers[bucket_id] = gpu_buffer
-        return ipc.get_ipc_handle(gpu_buffer)
+        return self._encode_handle(gpu_buffer)
 
     # --- hierarchical helpers ---
     def get_shared_gpu(self, bucket_id: int):  # noqa: ANN201
@@ -164,12 +186,11 @@ class CudaIPCAgent:
     def share_from_gpu(self, bucket_id: int, gpu_tensor):  # noqa: ANN001, ANN201
         """Register an existing GPU tensor as the shared buffer and return its IPC handle."""
         self._shared_buffers[int(bucket_id)] = gpu_tensor
-        return ipc.get_ipc_handle(gpu_tensor)
+        return self._encode_handle(gpu_tensor)
 
     def receive_shared(self, bucket_id: int, ipc_handle: Any):
         """(Worker Nodes) Opens an IPC handle and stores the memory view."""
-        # This provides a zero-copy view into the root node's GPU memory.
-        self._shared_buffers[bucket_id] = ipc.open_ipc_handle(ipc_handle)
+        self._shared_buffers[bucket_id] = self._decode_handle(ipc_handle)
         
     def scatter_from_shared(self, bucket_id: int, items: List[Dict[str, Any]]):
         """Scatters data from the shared bucket buffer into private per-tensor buffers."""

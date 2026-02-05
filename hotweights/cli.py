@@ -28,8 +28,11 @@ import numpy as np
 def _derive_pub_endpoint(endpoint: str) -> str:
     """Derive a PUB endpoint from a REP endpoint by incrementing port."""
     try:
-        if endpoint.startswith("tcp://") and ":" in endpoint.rsplit(":", 1)[-1]:
-            host, port_s = endpoint[len("tcp://") :].rsplit(":", 1)
+        if endpoint.startswith("tcp://"):
+            host_port = endpoint[len("tcp://") :]
+            if ":" not in host_port:
+                return "tcp://127.0.0.1:5556"
+            host, port_s = host_port.rsplit(":", 1)
             port = int(port_s)
             return f"tcp://{host}:{port+1}"
     except Exception:
@@ -265,8 +268,6 @@ def _cmd_replicate(args: argparse.Namespace) -> int:
                     items = b["items"]
                     size = int(b["size"])  # precomputed
                     consumers = b.get("consumer_ranks")
-                    if consumers is not None and rank not in consumers:
-                        continue
                     group_root = 0 if not consumers else min(int(x) for x in consumers)
                     if rank == group_root:
                         buf = _assemble_bucket(items)
@@ -281,8 +282,13 @@ def _cmd_replicate(args: argparse.Namespace) -> int:
             def on_complete(_bid: int, _buf: np.ndarray) -> None:
                 b, buf = bucket_bufs.pop(0)
                 items = b["items"]
+                consumers = b.get("consumer_ranks")
+                if consumers is not None and rank not in [int(x) for x in consumers]:
+                    return
                 _scatter_bucket(host, items, buf)
-                if getattr(args, "verify", False) and rank == (min(int(x) for x in b.get("consumer_ranks", [0])) if b.get("consumer_ranks") else 0):
+                if getattr(args, "verify", False) and rank == (
+                    min(int(x) for x in consumers) if consumers else 0
+                ):
                     _verify_items(host, items)
                 all_items.extend(items)
 
@@ -477,8 +483,6 @@ def build_parser() -> argparse.ArgumentParser:
                         items = b["items"]
                         size = int(b["size"])  # precomputed
                         consumers = b.get("consumer_ranks")
-                        if consumers is not None and rank not in consumers:
-                            continue
                         group_root = 0 if not consumers else min(int(x) for x in consumers)
                         if rank == group_root:
                             buf = _assemble_bucket(items)
@@ -492,8 +496,11 @@ def build_parser() -> argparse.ArgumentParser:
                 def on_complete(_bid: int, _buf: _np.ndarray) -> None:
                     b, buf = bucket_bufs.pop(0)
                     items = b["items"]
+                    consumers = b.get("consumer_ranks")
+                    if consumers is not None and rank not in [int(x) for x in consumers]:
+                        return
                     _scatter_bucket(host, items, buf)
-                    if a.verify and rank == (min(int(x) for x in b.get("consumer_ranks", [0])) if b.get("consumer_ranks") else 0):
+                    if a.verify and rank == (min(int(x) for x in consumers) if consumers else 0):
                         _verify_items(host, items)
                     all_items.extend(items)
                 replicator.replicate_stream(gen(), on_complete)

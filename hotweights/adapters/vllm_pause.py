@@ -30,7 +30,7 @@ def find_engine(obj: Any) -> Any | None:
     return obj if hasattr(obj, "__dict__") else None
 
 
-def pause_requests(obj: Any, timeout_s: float = 5.0) -> None:
+def pause_requests(obj: Any, timeout_s: float = 5.0, drain: bool = True) -> None:
     eng = find_engine(obj) or obj
     # Try explicit pause methods
     for name in ("pause", "pause_requests", "block_new_requests"):
@@ -40,6 +40,8 @@ def pause_requests(obj: Any, timeout_s: float = 5.0) -> None:
                 break
             except Exception:
                 pass
+    if not drain:
+        return
     # Wait for in-flight to drain if we can observe
     deadline = time.time() + timeout_s
     for attr in ("num_active_requests", "active_requests", "running"):
@@ -70,4 +72,3 @@ def resume_requests(obj: Any) -> None:
                 break
             except Exception:
                 pass
-

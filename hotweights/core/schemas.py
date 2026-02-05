@@ -48,6 +48,7 @@ class PlanItem(TypedDict, total=False):
     shape: Optional[List[int]]
     key: str
     offset: int
+    tp_group: int | str
 
 
 class PlanBucket(TypedDict, total=False):
