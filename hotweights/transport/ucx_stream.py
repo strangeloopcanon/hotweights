@@ -253,14 +253,11 @@ class UCXReplicator(Transport):
                 ep = await ucp.create_endpoint(self.master_addr, self.master_port)
                 for item in bucket_iter:
                     if len(item) == 3:
-                        bucket_id, buf, consumers = item  # type: ignore[misc]
-                        if self.rank not in consumers:
-                            # Skip receive for non-consumer ranks
-                            continue
+                        bucket_id, buf, _consumers = item  # type: ignore[misc]
                     else:
                         bucket_id, buf = item  # type: ignore[misc]
                     await self._recv_into(ep, buf)
-                    on_complete(bucket_id, buf)
+                    on_complete(int(bucket_id), buf)
                 try:
                     await ep.close()
                 except Exception:

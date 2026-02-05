@@ -33,8 +33,11 @@ class WorkerConfig:
 
 def _derive_pub_endpoint(endpoint: str) -> str:
     try:
-        if endpoint.startswith("tcp://") and ":" in endpoint.rsplit(":", 1)[-1]:
-            host, port_s = endpoint[len("tcp://") :].rsplit(":", 1)
+        if endpoint.startswith("tcp://"):
+            host_port = endpoint[len("tcp://") :]
+            if ":" not in host_port:
+                return "tcp://127.0.0.1:5556"
+            host, port_s = host_port.rsplit(":", 1)
             port = int(port_s)
             return f"tcp://{host}:{port+1}"
     except Exception:
@@ -67,7 +70,7 @@ def run_worker(cfg: WorkerConfig) -> int:
     c.call("heartbeat", worker_id=worker_id)
 
     # 2. Plan Acquisition
-    plan = None
+    sub: Subscriber | None = None
     if cfg.use_sub:
         print("Waiting for 'begin' event via PUB/SUB...")
         pub_ep = cfg.pub_endpoint or os.getenv("HOTWEIGHTS_COORD_PUB") or _derive_pub_endpoint(cfg.endpoint)
@@ -75,6 +78,8 @@ def run_worker(cfg: WorkerConfig) -> int:
         # This loop waits for the coordinator to broadcast the start of an update
         while True:
             topic, payload = sub.recv()
+            if cfg.event_token and payload.get("tok") != cfg.event_token:
+                continue
             if topic == "begin":
                 break
             time.sleep(0.1)
@@ -96,16 +101,28 @@ def run_worker(cfg: WorkerConfig) -> int:
     
     # Wait for the final commit signal from the coordinator
     print("Waiting for final commit signal...")
-    while True:
-        topic, payload = sub.recv()
-        if topic == "commit" and payload.get("version") == plan.get("version"):
-            if payload.get("accepted"):
-                print("Commit signal received and accepted.")
-                break
-            else:
+    if sub is not None:
+        while True:
+            topic, payload = sub.recv()
+            if cfg.event_token and payload.get("tok") != cfg.event_token:
+                continue
+            if topic == "commit" and payload.get("version") == plan.get("version"):
+                if payload.get("accepted"):
+                    print("Commit signal received and accepted.")
+                    break
                 print("Commit signal received but was not accepted by quorum. Aborting.")
                 return 1
-        time.sleep(0.1)
+            time.sleep(0.1)
+    else:
+        while True:
+            st = c.call("status")
+            if st.get("state") == "committed" and st.get("version") == plan.get("version"):
+                print("Commit observed via coordinator status.")
+                break
+            if st.get("state") == "aborted":
+                print("Coordinator entered aborted state. Exiting.")
+                return 1
+            time.sleep(0.25)
 
     c.call("heartbeat", worker_id=worker_id)
     print("Worker finished successfully.")

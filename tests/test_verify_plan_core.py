@@ -18,3 +18,23 @@ def test_verify_plan_basic_missing_and_range():
     assert report["buckets_with_out_of_range"] == 1
     assert len(report["problems"]) >= 2
 
+
+def test_verify_plan_enforce_tp_superset_uses_item_tp_group() -> None:
+    plan = {
+        "buckets": [
+            {
+                "bucket_id": 0,
+                "items": [{"key": "a:0", "tp_group": "0"}],
+                "size": 0,
+                "consumer_ranks": [0],
+            }
+        ]
+    }
+    report = verify_plan(
+        plan,
+        require_consumers=True,
+        world_size=2,
+        tp_groups={"0": [0, 1]},
+        enforce_tp_superset=True,
+    )
+    assert any(p.get("error") == "consumer_ranks not superset of TP group" for p in report["problems"])

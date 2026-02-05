@@ -42,8 +42,11 @@ def _derive_pub_endpoint(endpoint: str) -> str:
     Only handles tcp://host:port. Falls back to tcp://127.0.0.1:5556.
     """
     try:
-        if endpoint.startswith("tcp://") and ":" in endpoint.rsplit(":", 1)[-1]:
-            host, port_s = endpoint[len("tcp://") :].rsplit(":", 1)
+        if endpoint.startswith("tcp://"):
+            host_port = endpoint[len("tcp://") :]
+            if ":" not in host_port:
+                return "tcp://127.0.0.1:5556"
+            host, port_s = host_port.rsplit(":", 1)
             port = int(port_s)
             return f"tcp://{host}:{port+1}"
     except Exception:

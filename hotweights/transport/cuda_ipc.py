@@ -32,10 +32,8 @@ import socket
 
 try:
     import torch
-    from torch.cuda import ipc
 except Exception:
     torch = None
-    ipc = None
 
 
 @dataclass
@@ -58,8 +56,10 @@ class CudaIPCTransport:
     _bucket_times: Any = field(init=False)
 
     def __post_init__(self):
-        if torch is None or ipc is None:
+        if torch is None:
             raise RuntimeError("PyTorch with CUDA support is required for CudaIPCTransport.")
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA is not available; CudaIPCTransport requires a CUDA device.")
         
         # In a real implementation, this would come from cluster integration
         self.rank = int(os.getenv("RANK", "0"))
@@ -293,7 +293,7 @@ class CudaIPCTransport:
         active_lock = asyncio.Lock()
 
         async def _guarded(bkt: Dict[str, Any]):
-            nonlocal inflight_bytes
+            nonlocal inflight_bytes, active
             async with sem:
                 # Enforce dynamic window (active < self._max_inflight)
                 while True:

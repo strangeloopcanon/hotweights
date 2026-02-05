@@ -55,6 +55,9 @@ class HotweightsVLLMBinding:
         obj,
         name_map: dict[str, str] | Callable[[dict], dict[str, str]] | None,
         endpoint: str,
+        use_mpi: bool = False,
+        pinned: bool = True,
+        verify: bool = False,
         use_kv_migration: bool = True, # Use SOTA feature by default
         device: str = "cuda",
         poll_interval: float = 2.0,
@@ -63,6 +66,9 @@ class HotweightsVLLMBinding:
         self.module = _extract_module(obj)
         self.name_map = name_map
         self.endpoint = endpoint
+        self.use_mpi = use_mpi
+        self.pinned = pinned
+        self.verify = verify
         self.use_kv_migration = use_kv_migration
         self.device = device
         self.poll_interval = poll_interval
@@ -194,6 +200,9 @@ def bind_to_vllm(
     engine_or_runner,
     name_map: dict[str, str] | Callable[[dict], dict[str, str]] | None,
     endpoint: str = "tcp://127.0.0.1:5555",
+    use_mpi: bool = False,
+    pinned: bool = True,
+    verify: bool = False,
     use_kv_migration: bool = True,
     device: str = "cuda",
     poll_interval: float = 2.0,
@@ -203,6 +212,9 @@ def bind_to_vllm(
         engine_or_runner,
         name_map,
         endpoint=endpoint,
+        use_mpi=use_mpi,
+        pinned=pinned,
+        verify=verify,
         use_kv_migration=use_kv_migration,
         device=device,
         poll_interval=poll_interval,

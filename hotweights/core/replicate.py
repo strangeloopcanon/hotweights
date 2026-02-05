@@ -43,6 +43,14 @@ def create_plan(prev: dict, nxt: dict, bucket_mb: int, consumer_map: Optional[Di
     delta = compute_delta(prev_df, next_df)
     bucket_bytes = int(bucket_mb * (1 << 20))
     packed = pack_buckets(delta, bucket_bytes=bucket_bytes).reset_index(drop=True)
+    part_map: dict[str, dict[str, Any]] = {}
+    try:
+        for t in nxt.get("tensors", []):
+            name = str(t.get("name", ""))
+            part = t.get("partitioning") or {}
+            part_map[name] = part if isinstance(part, dict) else {}
+    except Exception:
+        part_map = {}
 
     buckets: Dict[int, dict] = {}
     for row in packed.itertuples():
@@ -50,19 +58,21 @@ def create_plan(prev: dict, nxt: dict, bucket_mb: int, consumer_map: Optional[Di
         buckets.setdefault(b, {"bucket_id": b, "items": [], "size": 0})
         off = buckets[b]["size"]
         key = (row.tensor, int(row.shard_rank))
-        item = (
-            {
-                "tensor": row.tensor,
-                "shard_rank": int(row.shard_rank),
-                "nbytes": int(row.nbytes),
-                "hash": row.hash,
-                "uri": str(uri_map.get(key, "")),
-                "dtype": dtype_map.get(key),
-                "shape": shape_map.get(key),
-                "key": f"{row.tensor}:{int(row.shard_rank)}",
-                "offset": int(off),
-            }
-        )
+        item = {
+            "tensor": row.tensor,
+            "shard_rank": int(row.shard_rank),
+            "nbytes": int(row.nbytes),
+            "hash": row.hash,
+            "uri": str(uri_map.get(key, "")),
+            "dtype": dtype_map.get(key),
+            "shape": shape_map.get(key),
+            "key": f"{row.tensor}:{int(row.shard_rank)}",
+            "offset": int(off),
+        }
+        part = part_map.get(str(row.tensor), {})
+        gid = part.get("tp_group") or part.get("group") or part.get("group_id")
+        if gid is not None:
+            item["tp_group"] = gid
         buckets[b]["items"].append(item)
         buckets[b]["size"] = off + int(row.nbytes)
 
@@ -120,14 +130,6 @@ def create_plan(prev: dict, nxt: dict, bucket_mb: int, consumer_map: Optional[Di
                     tp = max(tps)
             except Exception:
                 tp = 0
-
-        # Build tensor->partitioning lookup
-        part_map: dict[str, dict] = {}
-        try:
-            for t in nxt.get("tensors", []):
-                part_map[t.get("name", "")] = t.get("partitioning") or {}
-        except Exception:
-            part_map = {}
 
         if tp_groups and isinstance(tp_groups, dict):
             # Map group ids to rank lists using partitioning info per item
@@ -231,15 +233,17 @@ def verify_plan(
                             "extra": extra,
                         })
                     if enforce_tp_superset:
-                        # If any tensor in bucket has a group, enforce that group's ranks ⊆ consumer_ranks
+                        # If any tensor in bucket has a group, enforce that group's
+                        # ranks are a subset of consumer_ranks.
                         groups_in_bucket = set()
                         for it in b.get("items", []):
-                            # Best-effort: infer group id from tensor metadata path (not carried here)
-                            # Callers should provide tp_groups and set enforce_tp_superset
-                            gid = None
-                            # No per-item partitioning in plan; skip unless future plan schema adds it
+                            gid = (
+                                it.get("tp_group")
+                                or it.get("group")
+                                or it.get("group_id")
+                            )
                             if gid is not None:
-                                groups_in_bucket.add(int(gid))
+                                groups_in_bucket.add(str(gid))
                         for gid in groups_in_bucket:
                             group_ranks = set(int(x) for x in tp_groups.get(str(gid), []))
                             if group_ranks and not group_ranks.issubset(set(int(x) for x in ranks)):

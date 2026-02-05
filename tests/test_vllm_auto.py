@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import types
 
+import hotweights.adapters.vllm_bind as vllm_bind
 from hotweights.adapters.vllm_auto import install_autobind
 
 
@@ -42,3 +43,18 @@ def test_install_autobind_patches_fake_engines(monkeypatch):
     assert getattr(a, "initialized", False) is True
     assert getattr(l, "initialized", False) is True
 
+
+def test_bind_to_vllm_accepts_compat_kwargs(monkeypatch):
+    class Dummy:
+        model = object()
+
+    monkeypatch.setattr(vllm_bind.HotweightsVLLMBinding, "start", lambda self: None)
+    binding = vllm_bind.bind_to_vllm(
+        Dummy(),
+        None,
+        endpoint="tcp://127.0.0.1:5555",
+        use_mpi=True,
+        pinned=False,
+        verify=True,
+    )
+    assert isinstance(binding, vllm_bind.HotweightsVLLMBinding)
