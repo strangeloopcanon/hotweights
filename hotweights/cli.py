@@ -173,6 +173,43 @@ def _cmd_plan(args: argparse.Namespace) -> int:
 # Note: bucket assemble/scatter/verify utilities are imported from core.replicate
 
 
+def _commit_with_quorum(c, version: str, token: str | None) -> bool:  # noqa: ANN001
+    """Wait for precommit quorum, then commit; return True on acceptance.
+
+    Firing commit immediately after begin can never reach quorum (no worker
+    has had a chance to precommit yet), so the commit would be rejected and
+    every subscriber would abort. On quorum timeout the update is aborted
+    and this returns False, as it does when the coordinator rejects the
+    commit.
+    """
+    quorum_timeout = float(os.getenv("HOTWEIGHTS_QUORUM_TIMEOUT", "120"))
+    deadline = time.time() + quorum_timeout
+    while True:
+        st = c.call("status") or {}
+        workers = st.get("workers") or []
+        acks = st.get("precommit_acks") or []
+        if all(w in acks for w in workers):
+            break
+        if time.time() >= deadline:
+            missing = [w for w in workers if w not in acks]
+            print(
+                f"quorum timeout after {quorum_timeout}s; "
+                f"missing precommit from {missing}"
+            )
+            print(
+                c.call("abort", version=version,
+                       reason="quorum timeout", token=token)
+            )
+            return False
+        time.sleep(1.0)
+    resp = c.call("commit", version=version, token=token)
+    print(resp)
+    if isinstance(resp, dict) and not resp.get("accepted", True):
+        print(f"commit rejected by quorum; waiting_for={resp.get('waiting_for')}")
+        return False
+    return True
+
+
 def _cmd_replicate(args: argparse.Namespace) -> int:
     plan = json.loads(Path(args.plan).read_text())
     total_bytes = int(plan.get("total_bytes", 0))
@@ -309,9 +346,11 @@ def _cmd_replicate(args: argparse.Namespace) -> int:
             digest = _plan_digest(plan)
             # Forward optional token via env HOTWEIGHTS_COORD_TOKEN
             token = os.getenv("HOTWEIGHTS_COORD_TOKEN")
+            version = plan.get("version", "unknown")
             print(c.call("submit_plan", plan=plan, digest=digest, token=token))
-            print(c.call("begin", version=plan.get("version", "unknown"), digest=digest, token=token))
-            print(c.call("commit", version=plan.get("version", "unknown"), token=token))
+            print(c.call("begin", version=version, digest=digest, token=token))
+            if not _commit_with_quorum(c, version, token):
+                return 1
             # Optionally persist current manifest
             if getattr(args, "manifest_next", None):
                 try:

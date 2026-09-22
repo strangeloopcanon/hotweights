@@ -54,6 +54,23 @@ def _derive_pub_endpoint(endpoint: str) -> str:
     return "tcp://127.0.0.1:5556"
 
 
+def _evict_version_handles(st: State, version: str | None) -> None:
+    """Drop stored IPC handles for *version*.
+
+    Handles pin a full model copy (base64-inflated ~33%) in coordinator
+    memory, so they must be released once the version is committed or
+    aborted instead of accumulating across updates.
+    """
+    if version is not None:
+        st.handles.pop(version, None)
+
+
+def _evict_superseded_handles(st: State, keep: str | None) -> None:
+    """Drop handles for every version except *keep* (used on begin)."""
+    for v in [v for v in st.handles if v != keep]:
+        st.handles.pop(v, None)
+
+
 def _evaluate_commit(st: State, version: str | None) -> dict[str, Any]:
     """Evaluate a commit request against precommit acknowledgements.
 
@@ -149,9 +166,12 @@ def serve(
                 rep.send_json({"error": "unauthorized"}); continue
             st.version = args.get("version")
             st.plan_digest = args.get("digest") or st.plan_digest
-            # reset precommit and have tracking for the new version
+            # reset precommit and have tracking for the new version; drop
+            # handles from superseded versions (each version pins a full
+            # model copy in coordinator memory, so they must not accumulate)
             st.precommit_acks.clear()
             st.have.clear()
+            _evict_superseded_handles(st, st.version)
             st.state = "begun"
             payload = {"event": "begin", "version": st.version, "digest": st.plan_digest}
             rep.send_json(payload)
@@ -176,6 +196,10 @@ def serve(
             if not _check_token():
                 rep.send_json({"error": "unauthorized"}); continue
             payload = _evaluate_commit(st, args.get("version"))
+            if payload["accepted"]:
+                # Release the version's handles: they pin a full model copy
+                # in coordinator memory (base64-inflated ~33%).
+                _evict_version_handles(st, args.get("version"))
             rep.send_json(payload)
             try:
                 log.info(f"commit version={st.version} accepted={payload['accepted']} waiting={payload['waiting_for']}")
@@ -187,6 +211,7 @@ def serve(
                 rep.send_json({"error": "unauthorized"}); continue
             payload = {"event": "abort", "reason": args.get("reason")}
             st.state = "aborted"
+            _evict_version_handles(st, args.get("version") or st.version)
             rep.send_json(payload)
             _pub("abort", payload)
         elif method == "submit_plan":
