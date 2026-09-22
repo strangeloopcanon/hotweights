@@ -97,7 +97,14 @@ def run_worker(cfg: WorkerConfig) -> int:
     print("Replication complete.")
 
     # 4. Precommit and Commit
-    c.call("precommit", worker_id=worker_id)
+    # Forward the event token: the coordinator rejects mutating RPCs without
+    # it when token gating is configured.
+    c.call(
+        "precommit",
+        worker_id=worker_id,
+        version=plan.get("version"),
+        token=cfg.event_token,
+    )
     
     # Wait for the final commit signal from the coordinator
     print("Waiting for final commit signal...")

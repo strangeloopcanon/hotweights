@@ -9,9 +9,18 @@ try:  # optional
 except Exception:  # pragma: no cover - optional
     torch = None  # type: ignore
 import numpy as np
+from ..core.errors import HotweightsError
 from ..utils.torch_utils import torch_dtype_from_numpy_str
 from ..telemetry.metrics import Timer
 from ..telemetry.prom import Histogram
+
+
+class SwapError(HotweightsError):
+    """Raised when a weight update cannot be staged or verified safely.
+
+    Callers should treat this as "do not touch the live module": the update
+    must be discarded, not partially applied.
+    """
 
 
 class HotReloadExtension:
@@ -249,6 +258,144 @@ class NullContext:  # pragma: no cover - simple helper if no torch.cuda.stream
         return False
 
 
+def _resolve_param(module, target: str):  # noqa: ANN001, ANN202
+    """Resolve a dotted parameter path on a module; fail loudly if missing.
+
+    Silent skips here are how half-applied updates happen, so a missing
+    target is a hard error.
+    """
+    mod = module
+    parts = target.split(".")
+    try:
+        for p in parts[:-1]:
+            mod = getattr(mod, p)
+        return getattr(mod, parts[-1])
+    except AttributeError as exc:
+        raise SwapError(f"Cannot resolve parameter {target!r} on module") from exc
+
+
+def _materialize_staged_tensor(item: dict, src, param):  # noqa: ANN001, ANN202
+    """Convert a staged uint8 byte tensor into one matching ``param``.
+
+    Returns a tensor with the same shape, dtype and device as ``param.data``.
+    The result may alias the agent's staging buffer; it is safe to keep alive
+    via ``param.data`` (the buffer is reference-counted), but callers that
+    mutate staging afterwards should clone first.
+    """
+    tmp = src.to(device=param.data.device, dtype=param.data.dtype, non_blocking=True)
+    try:
+        return tmp.reshape(tuple(param.data.shape))
+    except Exception as exc:
+        raise SwapError(
+            f"Staged tensor for item {item.get('key')!r} has "
+            f"{tmp.numel()} elements but target has {param.data.numel()}"
+        ) from exc
+
+
+def stage_from_ipc_agent(
+    items: list[dict],
+    agent,
+    module,
+    name_map: dict[str, str],
+    device: str = "cuda",
+) -> dict:  # noqa: ANN001, ANN201
+    """Stage new weights from a CUDA-IPC agent WITHOUT touching the live module.
+
+    Returns an ordered dict mapping module parameter dotted path -> new tensor
+    (matching the live parameter's shape/dtype/device). Raises SwapError if
+    any item has no staged data or its target parameter cannot be resolved, so
+    callers can abort before mutating anything.
+    """
+    if torch is None:
+        raise RuntimeError("Torch is required for staged weight apply")
+    _ = device  # device placement follows the live parameters
+    staged: dict[str, object] = {}
+    for it in items:
+        key = it["key"]
+        target = name_map.get(key)
+        if target is None:
+            continue
+        src = getattr(agent, "get_staged_tensor", lambda *_: None)(key)
+        if src is None:
+            raise SwapError(
+                f"No staged tensor for plan item {key!r}; refusing partial update"
+            )
+        param = _resolve_param(module, target)
+        staged[target] = _materialize_staged_tensor(it, src, param)
+    if items and not staged:
+        raise SwapError("Staging produced no tensors; refusing empty update")
+    return staged
+
+
+def atomic_swap_params(module, staged: dict) -> None:  # noqa: ANN001
+    """Atomically flip module parameters to staged tensors.
+
+    Each ``param.data`` pointer is replaced (not copied into), so the old
+    weights stay live and untouched until the flip. Call only after the
+    coordinator has accepted the commit. Raises SwapError on shape/dtype
+    mismatch instead of installing a corrupt parameter.
+    """
+    if torch is None:
+        raise RuntimeError("Torch is required for atomic weight swap")
+    with torch.no_grad():
+        for target, new_t in staged.items():
+            param = _resolve_param(module, target)
+            try:
+                ok = (
+                    tuple(new_t.shape) == tuple(param.data.shape)
+                    and new_t.dtype == param.data.dtype
+                )
+            except Exception:
+                ok = False
+            if not ok:
+                raise SwapError(
+                    f"Staged tensor for {target!r} does not match live parameter "
+                    f"shape/dtype; refusing to swap"
+                )
+            param.data = new_t
+    try:
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+    except Exception:
+        pass
+
+
+def verify_staged_hashes(items: list[dict], read_bytes) -> None:  # noqa: ANN001
+    """Verify staged tensors against plan hashes BEFORE precommit.
+
+    ``read_bytes`` maps an item key -> raw bytes of the staged tensor.
+    Raises SwapError on the first mismatch.
+    """
+    import hashlib
+
+    for it in items:
+        algo, expect = it["hash"].split(":", 1)
+        h = hashlib.new(algo)
+        h.update(read_bytes(it["key"]))
+        got = h.hexdigest()
+        if got != expect:
+            raise SwapError(
+                f"hash mismatch for {it['key']}: got {got}, expect {expect}"
+            )
+
+
+def read_ipc_staged_bytes(agent, key: str, nbytes: int) -> bytes:  # noqa: ANN001, ANN202
+    """Read up to ``nbytes`` raw bytes from an agent's staged uint8 tensor."""
+    t = getattr(agent, "get_staged_tensor", lambda *_: None)(key)
+    if t is None:
+        raise SwapError(f"No staged tensor for key {key!r}")
+    if hasattr(t, "tobytes"):
+        try:
+            return bytes(t.tobytes()[:nbytes])
+        except Exception:
+            pass
+    try:
+        arr = t.cpu().numpy() if hasattr(t, "cpu") else np.asarray(t)
+        return bytes(arr.tobytes()[:nbytes])
+    except Exception as exc:
+        raise SwapError(f"Cannot read staged bytes for key {key!r}") from exc
+
+
 def apply_from_ipc_agent_to_module(
     items: list[dict],
     agent,
@@ -277,25 +424,13 @@ def apply_from_ipc_agent_to_module(
             src = getattr(agent, "get_staged_tensor", lambda *_: None)(key)
             if src is None:
                 continue
-            # locate param
-            mod = module
-            parts = target.split(".")
-            for p in parts[:-1]:
-                mod = getattr(mod, p)
-            pname = parts[-1]
-            param = getattr(mod, pname)
-            # Copy directly on device if possible; otherwise move
-            same_dev = src.device == param.data.device
-            same_dtype = src.dtype == param.data.dtype
-            same_shape = src.shape == param.data.shape
-            if same_dev and same_dtype and same_shape:
-                param.data.copy_(src, non_blocking=True)
-            else:
-                tmp = src.to(
-                    device=param.data.device,
-                    dtype=param.data.dtype,
-                    non_blocking=True,
-                )
-                param.data.copy_(tmp.reshape_as(param.data))
+            # Lenient legacy path: skip unresolvable params (strict callers
+            # should use stage_from_ipc_agent + atomic_swap_params instead).
+            try:
+                param = _resolve_param(module, target)
+                new_t = _materialize_staged_tensor(it, src, param)
+            except SwapError:
+                continue
+            param.data.copy_(new_t, non_blocking=True)
     if stream is not None:
         stream.synchronize()

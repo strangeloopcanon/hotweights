@@ -69,7 +69,8 @@ def _cmd_commit(args: argparse.Namespace) -> int:
         c = _maybe_coord_client(endpoint)
         if c is None:
             return 1
-        print(c.call("commit", version=args.version))
+        print(c.call("commit", version=args.version,
+                     token=os.getenv("HOTWEIGHTS_COORD_TOKEN")))
     else:
         print(f"Commit requested for version {args.version} (local stub)")
     return 0
@@ -369,7 +370,8 @@ def build_parser() -> argparse.ArgumentParser:
         if c is None:
             print("Coordinator not configured")
             return 1
-        print(c.call("precommit", worker_id=a.worker_id))
+        print(c.call("precommit", worker_id=a.worker_id,
+                     token=os.getenv("HOTWEIGHTS_COORD_TOKEN")))
         return 0
     sp.set_defaults(func=_cmd_precommit)
 
