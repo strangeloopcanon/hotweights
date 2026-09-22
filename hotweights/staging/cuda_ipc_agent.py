@@ -2,7 +2,8 @@
 SOTA Staging Agent using CUDA IPC.
 
 This agent manages GPU memory directly for staging tensor data. It is responsible
-for creating and opening CUDA IPC handles to enable true zero-copy data transfers.
+for creating and opening CUDA IPC handles to share staged tensors between
+processes on a node, with a full-bytes fallback when IPC is unavailable.
 
 Features:
 - Manages a pool of GPU memory for staging.
@@ -234,20 +235,6 @@ class CudaIPCAgent:
     def get_staged_tensor(self, key: str) -> torch.Tensor | None:
         """Gets a privately staged tensor, ready for use."""
         return self._private_staging.get(key)
-
-    def verify(self, items: List[Dict[str, Any]]) -> bool:
-        """Verifies the checksum of staged tensors on the GPU."""
-        # This is complex. A GPU-accelerated hashing algorithm would be needed.
-        # For now, we can copy back to CPU to verify, though it incurs overhead.
-        print("Verification on GPU is a complex feature (stubbed).")
-        # Example of how one item could be verified:
-        # for item in items:
-        #     key = item["key"]
-        #     gpu_tensor = self.get_staged_tensor(key)
-        #     if gpu_tensor is not None:
-        #         cpu_tensor = gpu_tensor.to("cpu")
-        #         # ... then hash cpu_tensor ...
-        return True
 
     def cleanup(self):
         """Releases all GPU memory."""

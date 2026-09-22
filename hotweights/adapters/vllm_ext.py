@@ -56,22 +56,25 @@ class HotReloadExtension:
             return {"key": key, "nbytes": nbytes, "buffer": mv}
 
     def finalize_shard(self, tensor: str, shard_rank: int, hash_: str) -> None:  # noqa: ANN001
-        # Copy from pinned host to shadow/device on a stream
+        # Copy from pinned host into the shadow staging area on a stream.
+        # The live module is NEVER touched here: commit() performs the flip
+        # only after every staged tensor has been validated, so an aborted
+        # update cannot leave the model partially mutated.
         key = f"{tensor}:{shard_rank}"
         mv = self._host_buffers.get(key)
         if mv is None:
             return
         nbytes = len(mv)
-        # Use dtype/shape hints if available via map (requires name mapping to target parameter)
+        # Use dtype/shape hints from the mapped parameter (read-only) to
+        # materialize a typed tensor; the parameter itself is not modified.
+        param = None
         target_name = self._map.get(key)
-        if target_name and self._module is not None and torch is not None:
-            mod = self._module
-            parts = target_name.split(".")
-            for p in parts[:-1]:
-                mod = getattr(mod, p)
-            pname = parts[-1]
-            param = getattr(mod, pname)
-            # Copy bytes into typed CPU tensor then async H2D
+        if target_name and self._module is not None:
+            try:
+                param = _resolve_param(self._module, target_name)
+            except (AttributeError, SwapError):
+                param = None
+        if torch is not None and param is not None:
             with Timer("h2d") as t:
                 cpu_t = torch.empty_like(param.data, device="cpu", pin_memory=True)
                 view_dst = cpu_t.view(torch.uint8)
@@ -83,11 +86,8 @@ class HotReloadExtension:
                         bytearray(mv.tobytes()), dtype=torch.uint8
                     )
                     view_dst[:nbytes].copy_(src_buf[:nbytes])
-                if torch.cuda.is_available():
-                    param.data.copy_(cpu_t.to(param.data.device, non_blocking=True))
-                else:
-                    param.data.copy_(cpu_t)
             self._h2d_hist.observe(t.elapsed)
+            self.shadow[key] = cpu_t
         else:
             # fallback: store to shadow as bytes
             data = bytes(mv)
@@ -105,26 +105,38 @@ class HotReloadExtension:
             torch.cuda.synchronize()
 
     def commit(self, version: str) -> None:  # noqa: ANN001
-        # Atomically flip module parameter pointers to shadow where possible.
+        # Two-phase flip: validate every staged tensor against its target
+        # parameter first (resolution, shape, dtype). Only when all targets
+        # check out are the parameter pointers swapped, via a no-fail
+        # assignment pass. A validation failure raises SwapError before any
+        # parameter is touched, so the module can never be left half-swapped.
         self.version = version
+        if self._module is None or torch is None:
+            self.params = dict(self.shadow)
+            return
+        with torch.no_grad():
+            targets: dict[str, object] = {}
+            for key, target_name in self._map.items():
+                if key not in self.shadow:
+                    continue
+                param = _resolve_param(self._module, target_name)
+                staged = self.shadow[key]
+                if isinstance(staged, torch.Tensor) and staged.dtype != torch.uint8:
+                    new_t = staged
+                else:
+                    new_t = _materialize_shadow_tensor(staged, param)
+                if new_t.shape != param.data.shape or new_t.dtype != param.data.dtype:
+                    raise SwapError(
+                        f"staged tensor {key!r} shape={tuple(new_t.shape)} "
+                        f"dtype={new_t.dtype} does not match parameter "
+                        f"{target_name!r} shape={tuple(param.data.shape)} "
+                        f"dtype={param.data.dtype}"
+                    )
+                if new_t.device != param.data.device:
+                    new_t = new_t.to(param.data.device)
+                targets[target_name] = new_t.detach()
+            atomic_swap_params(self._module, targets)
         self.params = dict(self.shadow)
-        if self._module is not None and torch is not None:
-            with torch.no_grad():
-                for key, target_name in self._map.items():
-                    if key not in self.shadow:
-                        continue
-                    t = self.shadow[key]
-                    mod = self._module
-                    parts = target_name.split(".")
-                    for p in parts[:-1]:
-                        mod = getattr(mod, p)
-                    pname = parts[-1]
-                    param = getattr(mod, pname)
-                    if isinstance(t, torch.Tensor):
-                        if t.shape == param.data.shape and t.dtype == param.data.dtype:
-                            param.data = t.detach().clone()
-                        else:
-                            param.data.copy_(t.to(dtype=param.data.dtype).reshape_as(param.data))
 
     # --- helper for tests/local integration ---
     def ingest_from_host(self, items: list[dict], host) -> None:  # noqa: ANN001
@@ -256,6 +268,28 @@ class NullContext:  # pragma: no cover - simple helper if no torch.cuda.stream
 
     def __exit__(self, *exc: object) -> bool:  # noqa: ANN001
         return False
+
+
+def _materialize_shadow_tensor(staged, param):  # noqa: ANN001, ANN202
+    """Reinterpret in-memory staged bytes as a typed tensor matching *param*.
+
+    Used by the worker-extension commit path where staged data was stored as
+    raw ``uint8`` bytes (e.g. the shadow fallback in ``finalize_shard``).
+    Raises :class:`SwapError` when the byte length does not match the
+    parameter's storage size.
+    """
+    if torch is None:  # pragma: no cover - torch-gated caller
+        raise SwapError("torch is required to materialize staged tensors")
+    if isinstance(staged, torch.Tensor) and staged.dtype == torch.uint8:
+        raw = staged.reshape(-1)
+    else:
+        raw = torch.frombuffer(bytearray(bytes(staged)), dtype=torch.uint8)  # type: ignore[attr-defined]
+    expected = param.data.numel() * param.data.element_size()
+    if raw.numel() != expected:
+        raise SwapError(
+            f"staged byte length {raw.numel()} != parameter storage {expected}"
+        )
+    return raw.view(param.data.dtype).reshape(param.data.shape)
 
 
 def _resolve_param(module, target: str):  # noqa: ANN001, ANN202

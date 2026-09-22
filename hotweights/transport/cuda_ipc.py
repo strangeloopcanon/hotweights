@@ -2,7 +2,9 @@
 SOTA CUDA-IPC Transport Layer.
 
 Features:
-- Full zero-copy replication using CUDA IPC handles.
+- Replication via CUDA IPC shared-memory handles where available, with a
+  full-bytes fallback path (handles carry the buffer bytes through the
+  control plane) when IPC is unavailable.
 - GPU-aware topology discovery (NVLink, NVSwitch, PCIe).
 - Multi-lane, congestion-controlled data streaming.
 - Dynamic traffic shaping to avoid saturating interconnects.
@@ -18,7 +20,6 @@ import base64
 import hmac
 import hashlib
 import time
-import pickle
 from collections import deque
 
 import numpy as np
@@ -418,12 +419,9 @@ class CudaIPCTransport:
                         return "b64:" + base64.b64encode(bytes(data)).decode("ascii")
         except Exception:
             pass
-        # Fallback to pickle
-        try:
-            return "pkl:" + base64.b64encode(pickle.dumps(handle, protocol=pickle.HIGHEST_PROTOCOL)).decode("ascii")
-        except Exception:
-            pass
-        # Fallback to repr; real builds should provide proper handle bytes
+        # Fallback to repr; real builds should provide proper handle bytes.
+        # (Deliberately no pickle fallback: unpickling coordinator-supplied
+        # payloads is a remote-code-execution sink.)
         return f"repr:{repr(handle)}"
 
     def _deserialize_handle(self, payload: str) -> Any:
@@ -435,11 +433,6 @@ class CudaIPCTransport:
         if isinstance(payload, str) and payload.startswith("b64:"):
             try:
                 return base64.b64decode(payload[4:])
-            except Exception:
-                return payload
-        if isinstance(payload, str) and payload.startswith("pkl:"):
-            try:
-                return pickle.loads(base64.b64decode(payload[4:]))
             except Exception:
                 return payload
         return payload
@@ -471,11 +464,11 @@ class CudaIPCTransport:
         await asyncio.sleep(0.005)
 
     async def _receive_handle(self, bucket_id: int, version: str = "_") -> Any:
+        timeout = float(getattr(self, "_handle_timeout", 10.0))
         if self._client is not None:
             # Poll HA control plane with exponential backoff until handle is posted
             delay = 0.005
             elapsed = 0.0
-            timeout = 10.0
             while elapsed < timeout:
                 try:
                     payload = {"version": version, "bucket_id": int(bucket_id)}
@@ -500,8 +493,21 @@ class CudaIPCTransport:
                 await asyncio.sleep(delay)
                 elapsed += delay
                 delay = min(delay * 2.0, 0.1)
-        # Fallback local
+            raise TimeoutError(
+                f"timed out after {timeout}s waiting for handle "
+                f"bucket={bucket_id} version={version}"
+            )
+        # Fallback local registry (single-process tests); bounded wait so a
+        # missing handle surfaces as an error instead of hanging forever.
         self._handle_registry = getattr(self, "_handle_registry", {})
+        elapsed = 0.0
+        delay = 0.005
         while bucket_id not in self._handle_registry:
-            await asyncio.sleep(0.005)
+            if elapsed >= timeout:
+                raise TimeoutError(
+                    f"timed out after {timeout}s waiting for local handle "
+                    f"bucket={bucket_id}"
+                )
+            await asyncio.sleep(delay)
+            elapsed += delay
         return self._handle_registry[bucket_id]

@@ -3,8 +3,12 @@ High-Availability (HA) Control Plane with optional Redis backend.
 
 - Stores version-scoped state for workers, plans, and CUDA-IPC handles.
 - Leader election via a simple lock to avoid split brain.
-- TTL-based cleanup of posted handles; acks shorten TTLs.
-- Exposes the same RPCs as the basic ZeroMQ server so it can be swapped in.
+- TTL-based cleanup of posted handles; handle acks are recorded under a
+  separate key so one worker's ack never hides the handle from the rest.
+- Exposes the coordinator RPCs used by workers and binders (status,
+  register, heartbeat, submit_plan, get_plan, begin, precommit, commit,
+  abort, post_handle, get_handle, ack_handle). ``report_have``/``who_has``
+  from the basic ZeroMQ server are not implemented (nothing calls them).
 """
 from __future__ import annotations
 
@@ -161,6 +165,7 @@ class HAControlPlane:
         self.leader_key = "hotweights/leader"
         self.is_leader = False
         self.handle_ttl = float(os.getenv("HOTWEIGHTS_HANDLE_TTL", "30"))
+        self._heartbeats: dict[str, float] = {}
         # Metrics
         self.m_handles_posted = Counter("hotweights_handles_posted_total", "Total handles posted")
         self.m_handles_fetched = Counter("hotweights_handles_fetched_total", "Total handles fetched")
@@ -264,12 +269,31 @@ class HAControlPlane:
             plan_digest = self.kv.get("hotweights/plan/digest")
             ver = self.kv.get("hotweights/version/current")
             state = self.kv.get("hotweights/state/current")
+            ver_s = ver.decode("utf-8") if ver else ""
+            acked = [
+                k.split("/")[-1]
+                for k, _v in self.kv.get_prefix(f"hotweights/precommit/{ver_s}/")
+            ]
             return {
                 "workers": [w.get("id", "?") for w in workers],
-                "version": ver.decode("utf-8") if ver else None,
+                "version": ver_s or None,
                 "state": state.decode("utf-8") if state else "idle",
                 "plan_digest": plan_digest.decode() if plan_digest else None,
+                "precommit_acks": acked,
             }
+
+        if method == "get_plan":
+            raw = self.kv.get("hotweights/plan/current")
+            try:
+                plan = json.loads(raw.decode("utf-8")) if raw else None
+            except Exception:
+                plan = None
+            return {"plan": plan}
+
+        if method == "heartbeat":
+            wid = str(args.get("worker_id", "?"))
+            self._heartbeats[wid] = time.time()
+            return {"ok": True}
 
         if not self.is_leader:
             return {"error": "Not the leader. Please retry.", "leader_hint": "..."}
@@ -398,19 +422,35 @@ class HAControlPlane:
             b = int(args.get("bucket_id", -1))
             version = args.get("version") or "_"
             node = str(args.get("node") or "global")
+            worker = str(args.get("worker_id") or "?")
             if b < 0:
                 return {"ok": False}
-            key = f"hotweights/handles/{version}/{node}/{b}"
-            payload = json.dumps({"handle": None, "ts": time.time()}).encode("utf-8")
-            # Short TTL to ensure fast cleanup
-            self.kv.put(key, payload, ttl=5.0)
+            # Record the ack under a separate key. The handle itself must NOT
+            # be cleared here: other ranks on this node may not have fetched
+            # it yet, and the first ack previously replaced it with
+            # {"handle": None}, hanging every other consumer. TTL expiry
+            # (via the cleanup loop) reaps the handle.
+            ack_key = f"hotweights/ack_handles/{version}/{node}/{b}"
+            try:
+                raw = self.kv.get(ack_key)
+                acked = json.loads(raw.decode("utf-8")) if raw else []
+                if not isinstance(acked, list):
+                    acked = []
+            except Exception:
+                acked = []
+            if worker not in acked:
+                acked.append(worker)
+            self.kv.put(ack_key, json.dumps(acked).encode("utf-8"), ttl=self.handle_ttl)
             self.m_handles_acked.inc(1.0)
             self._update_active_handles_gauge()
             try:
-                self._log.debug(f"ack_handle version={version} node={node} bucket={b}")
+                self._log.debug(
+                    f"ack_handle version={version} node={node} "
+                    f"bucket={b} worker={worker}"
+                )
             except Exception:
                 pass
-            return {"ok": True}
+            return {"ok": True, "acked": acked}
 
         else:
             return {"error": f"Unknown method {method}"}

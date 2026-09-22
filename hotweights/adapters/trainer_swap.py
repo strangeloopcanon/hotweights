@@ -48,17 +48,37 @@ def sota_in_place_swap(
     """
     print("Starting SOTA in-place swap for training...")
 
+    # 0. Pre-validate every target before touching any weight: a partial swap
+    #    followed by optimizer sync is silent training corruption, so any
+    #    unresolvable parameter or shape mismatch aborts the whole swap.
+    planned: list[tuple[str, object, object]] = []
+    failures: list[str] = []
+    for key, target_name in name_map.items():
+        if key not in staged_tensors:
+            continue
+        new_tensor = staged_tensors[key]
+        try:
+            param = model.get_parameter(target_name)
+        except Exception as e:
+            failures.append(f"{target_name}: resolve failed: {e}")
+            continue
+        if param.shape != new_tensor.shape:
+            failures.append(
+                f"{target_name}: shape {tuple(param.shape)} != "
+                f"staged {tuple(new_tensor.shape)}"
+            )
+            continue
+        planned.append((target_name, param, new_tensor))
+    if failures:
+        raise RuntimeError(
+            "sota_in_place_swap aborted before mutating any weight; "
+            + "; ".join(failures)
+        )
+
     # 1. Update model weights in-place
     with torch.no_grad(), swap_barrier():
-        for key, target_name in name_map.items():
-            if key in staged_tensors:
-                new_tensor = staged_tensors[key]
-                try:
-                    param = model.get_parameter(target_name)
-                    assert param.shape == new_tensor.shape
-                    param.data.copy_(new_tensor, non_blocking=True)
-                except Exception as e:
-                    print(f"Warning: Could not swap param {target_name}: {e}")
+        for _, param, new_tensor in planned:
+            param.data.copy_(new_tensor, non_blocking=True)
         torch.cuda.synchronize()
 
     # 2. Synchronize the optimizer state using the SOTA module
