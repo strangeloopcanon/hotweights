@@ -61,6 +61,19 @@ Notes
 - Binder’s GPU-native path is enabled when HOTWEIGHTS_USE_IPC_AGENT=1 and a
   hotweights_agent is attached to your engine; otherwise it assumes a worker
   performs the apply. For CPU-only smoke, use the WorkerExtension approach.
+- The binder applies updates with a two-phase, quorum-gated protocol:
+  1. New weights are staged into shadow tensors without touching the live
+     module; with `verify=True` their hashes are checked before precommit.
+  2. The binder registers with the coordinator and issues `precommit` then
+     `commit`. The commit is honored only when the coordinator reports
+     `accepted=True` (all registered workers precommitted).
+  3. On accept, parameters are flipped atomically (`param.data` pointer swap)
+     and the migrated KV-cache is installed, all while requests are paused.
+     On rejection, the staged tensors are discarded and the live module is
+     untouched; the binder retries on the next poll instead of advancing.
+- If the coordinator is started with an event token, the binder forwards it
+  on `precommit`/`commit` via the `event_token` argument (or the
+  `HOTWEIGHTS_COORD_TOKEN` env var); without it those RPCs are rejected.
 - For CUDA-IPC intra-node + UCX/MPI inter-node setups, see docs/WALKTHROUGHS.md
   and docs/PRESETS.md to configure transport and topology knobs.
 

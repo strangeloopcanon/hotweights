@@ -54,6 +54,30 @@ def _derive_pub_endpoint(endpoint: str) -> str:
     return "tcp://127.0.0.1:5556"
 
 
+def _evaluate_commit(st: State, version: str | None) -> dict[str, Any]:
+    """Evaluate a commit request against precommit acknowledgements.
+
+    The advertised version (and ``committed`` state) only advance when every
+    registered worker has precommitted. A rejected commit leaves the current
+    version untouched so workers never observe a version that was not
+    accepted.
+    """
+    missing = [wid for wid in st.workers.keys() if wid not in st.precommit_acks]
+    accepted = len(missing) == 0
+    if accepted:
+        st.version = version
+        st.state = "committed"
+    return {
+        "event": "commit",
+        "version": st.version,
+        "acks": len(st.precommit_acks),
+        "total_workers": len(st.workers),
+        "accepted": accepted,
+        "waiting_for": missing,
+        "digest": st.plan_digest,
+    }
+
+
 def serve(
     endpoint: str = "tcp://127.0.0.1:5555",
     pub_endpoint: Optional[str] = None,
@@ -151,21 +175,10 @@ def serve(
         elif method == "commit":
             if not _check_token():
                 rep.send_json({"error": "unauthorized"}); continue
-            st.version = args.get("version")
-            missing = [wid for wid in st.workers.keys() if wid not in st.precommit_acks]
-            payload = {
-                "event": "commit",
-                "version": st.version,
-                "acks": len(st.precommit_acks),
-                "total_workers": len(st.workers),
-                "accepted": len(missing) == 0,
-                "waiting_for": missing,
-                "digest": st.plan_digest,
-            }
-            st.state = "committed" if len(missing) == 0 else st.state
+            payload = _evaluate_commit(st, args.get("version"))
             rep.send_json(payload)
             try:
-                log.info(f"commit version={st.version} accepted={payload['accepted']} waiting={missing}")
+                log.info(f"commit version={st.version} accepted={payload['accepted']} waiting={payload['waiting_for']}")
             except Exception:
                 pass
             _pub("commit", payload)

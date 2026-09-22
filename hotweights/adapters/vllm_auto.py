@@ -19,6 +19,7 @@ def install_autobind(
     verify: bool = False,
     device: str = "cuda",
     poll_interval: float = 2.0,
+    event_token: str | None = None,
 ) -> bool:
     """Install auto-binding into vLLM engines if available.
 
@@ -58,6 +59,7 @@ def install_autobind(
                         verify=verify,
                         device=device,
                         poll_interval=poll_interval,
+                        event_token=event_token,
                     )
                     self._hotweights_binding = b  # type: ignore[attr-defined]
             except Exception:

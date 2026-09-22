@@ -8,6 +8,7 @@ High-Availability (HA) Control Plane with optional Redis backend.
 """
 from __future__ import annotations
 
+import base64
 import json
 import threading
 import time
@@ -116,6 +117,26 @@ class RedisKVStore:
 
     def acquire_lock(self, lock_key: str, ttl: int = 10) -> bool:
         return bool(self._r.set(lock_key, str(time.time()), nx=True, ex=max(1, int(ttl))))
+
+
+def _encode_handle_json(handle):  # noqa: ANN001, ANN202
+    """Encode a handle (often raw bytes from CUDA IPC) as JSON-safe payload."""
+    if isinstance(handle, memoryview):
+        handle = handle.tobytes()
+    if isinstance(handle, (bytes, bytearray)):
+        return {
+            "handle": base64.b64encode(bytes(handle)).decode("ascii"),
+            "encoding": "base64",
+        }
+    return {"handle": handle, "encoding": "json"}
+
+
+def _decode_handle_json(data: dict):  # noqa: ANN001, ANN202
+    """Inverse of _encode_handle_json; returns the handle and sig."""
+    h = data.get("handle")
+    if data.get("encoding") == "base64" and isinstance(h, str):
+        h = base64.b64decode(h.encode("ascii"))
+    return h, data.get("sig")
 
 
 class HAControlPlane:
@@ -241,8 +262,12 @@ class HAControlPlane:
         if method == "status":
             workers = [json.loads(v) for _k, v in self.kv.get_prefix("hotweights/workers/")]
             plan_digest = self.kv.get("hotweights/plan/digest")
+            ver = self.kv.get("hotweights/version/current")
+            state = self.kv.get("hotweights/state/current")
             return {
                 "workers": [w.get("id", "?") for w in workers],
+                "version": ver.decode("utf-8") if ver else None,
+                "state": state.decode("utf-8") if state else "idle",
                 "plan_digest": plan_digest.decode() if plan_digest else None,
             }
 
@@ -269,31 +294,78 @@ class HAControlPlane:
             version = args["version"]
             self.kv.delete_prefix(f"hotweights/versions/{version}/")
             self.kv.delete_prefix(f"hotweights/handles/{version}/")
+            self.kv.delete_prefix(f"hotweights/precommit/{version}/")
             self.kv.put(f"hotweights/versions/{version}/active", b"1")
+            self.kv.put("hotweights/version/current", str(version).encode("utf-8"))
+            self.kv.put("hotweights/state/current", b"begun")
             self._publish("begin", {"version": version})
             return {"event": "begin", "version": version}
 
+        elif method == "precommit":
+            wid = str(args.get("worker_id", "?"))
+            version = str(args.get("version") or "")
+            self.kv.put(
+                f"hotweights/precommit/{version}/{wid}",
+                str(time.time()).encode("utf-8"),
+            )
+            self.kv.put("hotweights/state/current", b"precommit")
+            acks = self.kv.get_prefix(f"hotweights/precommit/{version}/")
+            self._publish("precommit", {"worker_id": wid, "acks": len(acks)})
+            return {"ok": True, "acks": len(acks)}
+
+        elif method == "abort":
+            self.kv.put("hotweights/state/current", b"aborted")
+            payload = {"event": "abort", "reason": args.get("reason")}
+            self._publish("abort", payload)
+            return payload
+
         elif method == "commit":
-            version = args["version"]
-            self.kv.delete_prefix(f"hotweights/handles/{version}/")
-            self._publish("commit", {"version": version, "accepted": True})
-            return {"event": "commit", "version": version, "accepted": True}
+            version = str(args.get("version") or "")
+            workers = [
+                json.loads(v) for _k, v in self.kv.get_prefix("hotweights/workers/")
+            ]
+            worker_ids = [str(w.get("id", "?")) for w in workers]
+            acked = {
+                k.split("/")[-1]
+                for k, _v in self.kv.get_prefix(f"hotweights/precommit/{version}/")
+            }
+            missing = [wid for wid in worker_ids if wid not in acked]
+            accepted = len(missing) == 0
+            if accepted:
+                self.kv.delete_prefix(f"hotweights/handles/{version}/")
+                self.kv.put("hotweights/version/current", version.encode("utf-8"))
+                self.kv.put("hotweights/state/current", b"committed")
+            payload = {
+                "event": "commit",
+                "version": version,
+                "accepted": accepted,
+                "acks": len(acked),
+                "total_workers": len(worker_ids),
+                "waiting_for": missing,
+            }
+            self._publish("commit", payload)
+            return payload
 
         elif method == "post_handle":
             b = int(args.get("bucket_id", -1))
             handle = args.get("handle")
             version = args.get("version") or "_"
+            node = str(args.get("node") or "global")
             sig = args.get("sig")
             if b < 0 or handle is None:
                 return {"ok": False, "error": "invalid args"}
-            key = f"hotweights/handles/{version}/{b}"
-            payload = json.dumps({"handle": handle, "sig": sig, "ts": time.time()}).encode("utf-8")
+            # Node-scoped key: per-node leaders must not clobber each other.
+            key = f"hotweights/handles/{version}/{node}/{b}"
+            rec = _encode_handle_json(handle)
+            rec["sig"] = sig
+            rec["ts"] = time.time()
+            payload = json.dumps(rec).encode("utf-8")
             self.kv.put(key, payload, ttl=self.handle_ttl)
-            self._publish("handle", {"bucket_id": b})
+            self._publish("handle", {"bucket_id": b, "node": node})
             self.m_handles_posted.inc(1.0)
             self._update_active_handles_gauge()
             try:
-                self._log.debug(f"post_handle version={version} bucket={b}")
+                self._log.debug(f"post_handle version={version} node={node} bucket={b}")
             except Exception:
                 pass
             return {"ok": True}
@@ -301,20 +373,21 @@ class HAControlPlane:
         elif method == "get_handle":
             b = int(args.get("bucket_id", -1))
             version = args.get("version") or "_"
+            node = str(args.get("node") or "global")
             if b < 0:
                 return {"handle": None}
-            key = f"hotweights/handles/{version}/{b}"
-            raw = self.kv.get(key)
+            raw = self.kv.get(f"hotweights/handles/{version}/{node}/{b}")
+            if raw is None and node != "global":
+                raw = self.kv.get(f"hotweights/handles/{version}/global/{b}")
             if not raw:
                 return {"handle": None}
             try:
                 data = json.loads(raw.decode("utf-8"))
-                h = data.get("handle")
-                s = data.get("sig")
+                h, s = _decode_handle_json(data)
                 if h:
                     self.m_handles_fetched.inc(1.0)
                     try:
-                        self._log.debug(f"get_handle version={version} bucket={b}")
+                        self._log.debug(f"get_handle version={version} node={node} bucket={b}")
                     except Exception:
                         pass
                 return {"handle": h, "sig": s}
@@ -324,16 +397,17 @@ class HAControlPlane:
         elif method == "ack_handle":
             b = int(args.get("bucket_id", -1))
             version = args.get("version") or "_"
+            node = str(args.get("node") or "global")
             if b < 0:
                 return {"ok": False}
-            key = f"hotweights/handles/{version}/{b}"
+            key = f"hotweights/handles/{version}/{node}/{b}"
             payload = json.dumps({"handle": None, "ts": time.time()}).encode("utf-8")
             # Short TTL to ensure fast cleanup
             self.kv.put(key, payload, ttl=5.0)
             self.m_handles_acked.inc(1.0)
             self._update_active_handles_gauge()
             try:
-                self._log.debug(f"ack_handle version={version} bucket={b}")
+                self._log.debug(f"ack_handle version={version} node={node} bucket={b}")
             except Exception:
                 pass
             return {"ok": True}

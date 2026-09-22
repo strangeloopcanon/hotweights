@@ -105,3 +105,28 @@ def test_worker_validates_event_token(monkeypatch) -> None:
     rc = run_worker(cfg)
     assert rc == 0
     assert tr.replicated is True
+
+
+def test_worker_precommit_forwards_token_and_version(monkeypatch) -> None:
+    """Mutating RPCs must carry the event token when token gating is on."""
+    calls: list[tuple[str, dict]] = []
+
+    class _RecordingClient(_FakeClientNoSub):
+        def call(self, method: str, **kwargs):  # noqa: ANN003, ANN201
+            calls.append((method, dict(kwargs)))
+            return super().call(method, **kwargs)
+
+    client = _RecordingClient()
+    _install_worker_dummies(monkeypatch, client)
+    cfg = WorkerConfig(
+        endpoint="tcp://127.0.0.1:5555",
+        device="cuda",
+        use_sub=False,
+        event_token="secret",
+    )
+    rc = run_worker(cfg)
+    assert rc == 0
+    precommits = [kw for m, kw in calls if m == "precommit"]
+    assert len(precommits) == 1
+    assert precommits[0].get("token") == "secret"
+    assert precommits[0].get("version") == "v1"
