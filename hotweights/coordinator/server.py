@@ -1,7 +1,8 @@
-"""Control-plane server (stub).
+"""In-memory control-plane coordinator.
 
-A real implementation would use ZeroMQ to coordinate begin/commit events.
-This stub exists to anchor interfaces referenced in the design.
+Used by the FastAPI control-plane app; the ZeroMQ server (``zmq_server``)
+and the Redis-backed HA control plane implement the same begin/precommit/
+commit/abort lifecycle for production deployments.
 """
 from __future__ import annotations
 

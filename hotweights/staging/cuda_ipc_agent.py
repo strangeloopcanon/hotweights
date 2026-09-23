@@ -19,7 +19,6 @@ import os
 
 import numpy as np
 
-from ..core.replicate import assemble_bucket_to_buffer
 from ..telemetry.cuda_ipc_metrics import CudaIPCMetrics
 
 try:

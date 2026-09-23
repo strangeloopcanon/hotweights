@@ -4,7 +4,7 @@ Define stable TypedDicts for interchange between components.
 """
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Literal
+from typing import Dict, List, Optional
 
 try:  # pragma: no cover - import shim for pydantic compatibility
     from typing_extensions import TypedDict

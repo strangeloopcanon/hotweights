@@ -1,2 +1,2 @@
-"""Coordinator package (stubs)."""
+"""Coordinator package: control-plane servers, clients, and HA state."""
 

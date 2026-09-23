@@ -10,7 +10,6 @@ from pathlib import Path
 from .manifest import build_simple_manifest, dump_manifest, load_manifest
 from .core.replicate import (
     create_plan as _create_plan_core,
-    create_plan_from_current as _create_plan_from_current,
     assemble_bucket as _assemble_bucket,
     scatter_bucket as _scatter_bucket,
     verify_items as _verify_items,
