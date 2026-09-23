@@ -1,4 +1,10 @@
-"""vLLM WorkerExtension skeleton for hot reload (stub).
+"""vLLM worker extension for hot weight reload.
+
+Implements the two-phase swap protocol: shards are staged into a shadow area
+by ``finalize_shard`` (live params are only read for shape/dtype hints, never
+written), then ``commit`` validates every staged target and pointer-swaps them
+in a no-fail pass. Any validation failure raises before a single live param
+is touched.
 
 Torch is optional; falls back to NumPy arrays when unavailable.
 """

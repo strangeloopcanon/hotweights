@@ -5,7 +5,7 @@ For the MVP, we treat each file under a checkpoint directory as a shard.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, TypedDict
 import hashlib

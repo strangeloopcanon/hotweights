@@ -16,7 +16,6 @@ import threading
 import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple, Callable
-import weakref
 
 import numpy as np
 

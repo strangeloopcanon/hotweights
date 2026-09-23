@@ -1,2 +1,2 @@
-"""Staging package (stubs)."""
+"""Staging package: host and CUDA-IPC staging agents."""
 

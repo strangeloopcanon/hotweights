@@ -29,7 +29,6 @@ hotweights/adapters/vllm_register_010.py
 hotweights/cli_wizards/__init__.py
 hotweights/cli_wizards/mapping_wizard.py
 hotweights/coordinator/__init__.py
-hotweights/coordinator/client.py
 hotweights/coordinator/fastapi_app.py
 hotweights/coordinator/ha_control_plane.py
 hotweights/coordinator/server.py
@@ -56,7 +55,6 @@ hotweights/transport/donor_select.py
 hotweights/transport/gds_storage.py
 hotweights/transport/mpi_stream.py
 hotweights/transport/nccl_stream.py
-hotweights/transport/p2p.py
 hotweights/transport/topology_scheduler.py
 hotweights/transport/transport_manager.py
 hotweights/transport/ucx_p2p.py
